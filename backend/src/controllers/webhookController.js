@@ -10,6 +10,17 @@ async function create(req, res, next) {
   try {
     const { url, events } = req.body;
 
+    // Webhook endpoints must be HTTPS to protect the HMAC secret in transit
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
+    if (parsedUrl.protocol !== 'https:') {
+      return res.status(400).json({ error: 'Webhook URL must use HTTPS' });
+    }
+
     const ssrfCheck = await validateOutboundUrl(url);
     if (!ssrfCheck.valid) {
       return res.status(400).json({

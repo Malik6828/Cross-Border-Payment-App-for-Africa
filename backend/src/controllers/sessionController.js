@@ -61,10 +61,13 @@ async function recordSession(userId, token, req) {
     jti = payload.jti || null;
   } catch {}
 
-  await db.query('BEGIN');
+  // Acquire a dedicated client so BEGIN/COMMIT are scoped to a single connection
+  const client = await db.pool.connect();
   try {
+    await client.query('BEGIN');
+
     // Count active sessions
-    const { rows: activeSessions } = await db.query(
+    const { rows: activeSessions } = await client.query(
       `SELECT id, token_jti, last_active_at
        FROM sessions
        WHERE user_id = $1 AND is_active = TRUE
@@ -75,7 +78,7 @@ async function recordSession(userId, token, req) {
     if (activeSessions.length >= SESSION_CAP) {
       // Invalidate the oldest session
       const oldest = activeSessions[0];
-      await db.query(
+      await client.query(
         `UPDATE sessions SET is_active = FALSE WHERE id = $1`,
         [oldest.id]
       );
@@ -88,7 +91,7 @@ async function recordSession(userId, token, req) {
       });
     }
 
-    await db.query(
+    await client.query(
       `INSERT INTO sessions
          (user_id, token_hash, token_jti, device_info, device_type, ip_address, location, user_agent, is_active, last_active_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, NOW())
@@ -101,10 +104,12 @@ async function recordSession(userId, token, req) {
       ]
     );
 
-    await db.query('COMMIT');
+    await client.query('COMMIT');
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
+    await client.query('ROLLBACK').catch(() => {});
     throw err;
+  } finally {
+    client.release();
   }
 }
 

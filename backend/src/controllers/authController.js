@@ -124,17 +124,27 @@ async function register(req, res, next) {
     const { raw: otpRaw, hashed: otpHashed } = phone ? generatePhoneOTP() : { raw: null, hashed: null };
     const otpExpiresAt = phone ? new Date(Date.now() + PHONE_OTP_TTL_MS) : null;
 
-    await db.query('BEGIN');
-    await db.query(
-      `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
-       VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
-      [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
-    );
-    await db.query(
-      `INSERT INTO wallets (id, user_id, public_key, encrypted_secret_key) VALUES ($1,$2,$3,$4)`,
-      [uuidv4(), userId, publicKey, encryptedSecretKey]
-    );
-    await db.query('COMMIT');
+    // Acquire a dedicated client so BEGIN/COMMIT are scoped to a single connection.
+    // If the wallet INSERT fails the ROLLBACK will undo the user INSERT too.
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
+         VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
+        [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
+      );
+      await client.query(
+        `INSERT INTO wallets (id, user_id, public_key, encrypted_secret_key) VALUES ($1,$2,$3,$4)`,
+        [uuidv4(), userId, publicKey, encryptedSecretKey]
+      );
+      await client.query('COMMIT');
+    } catch (clientErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw clientErr;
+    } finally {
+      client.release();
+    }
 
     // Auto-add USDC trustline so new accounts can receive USDC immediately
     let trustline_status = 'skipped';
@@ -159,7 +169,6 @@ async function register(req, res, next) {
       trustline_status,
     });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
     next(err);
   }
 }
@@ -787,20 +796,29 @@ async function resetPassword(req, res, next) {
     const { user_id: userId } = found.rows[0];
     const passwordHash = await bcrypt.hash(password, 12);
 
-    await db.query('BEGIN');
-    await db.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, userId]);
-    await db.query(
-      `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
-      [userId]
-    );
-    await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
-    await db.query('COMMIT');
+    // Acquire a dedicated client so the three writes are atomic — if any step
+    // fails, ROLLBACK undoes all prior changes within this transaction.
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, userId]);
+      await client.query(
+        `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
+        [userId]
+      );
+      await client.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
+      await client.query('COMMIT');
+    } catch (clientErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw clientErr;
+    } finally {
+      client.release();
+    }
 
     audit.log(userId, 'password_change', req.ip, req.headers['user-agent']);
     audit.log(userId, 'password_reset_sessions_invalidated', req.ip, req.headers['user-agent']);
     res.json({ message: 'Password has been reset. You can now log in.' });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
     next(err);
   }
 }

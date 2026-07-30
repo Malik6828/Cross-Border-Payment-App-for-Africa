@@ -56,6 +56,12 @@ jobs:
       run: |
         cd backend
         npm ci
+
+    - name: Check for undeclared dependencies (backend)
+      if: matrix.component == 'backend'
+      run: |
+        cd backend
+        npx depcheck --ignores='swagger-jsdoc,swagger-ui-express,nodemon' --ignore-dirs='__mocks__,coverage'
     
     - name: Install frontend deps  
       if: matrix.component == 'frontend'
