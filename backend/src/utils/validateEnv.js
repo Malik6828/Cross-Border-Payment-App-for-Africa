@@ -49,6 +49,26 @@ function validateEnv() {
     return;
   }
 
+  // ENCRYPTION_KEY length enforcement.
+  // All five Soroban-facing services derive a 32-byte AES key via SHA-256
+  // (deriveAesKey in utils/symmetricEncryption.js). Any printable string of
+  // ≥ 16 chars works, but shorter secrets have inadequate entropy.
+  const encKey = process.env.ENCRYPTION_KEY;
+  if (encKey && encKey.length < 16) {
+    console.error(
+      `\x1b[31m[CONFIG ERROR] ENCRYPTION_KEY is too short (${encKey.length} chars). ` +
+      'Minimum 16 characters required; 32+ strongly recommended.\x1b[0m'
+    );
+    process.exit(1);
+    return;
+  }
+  if (encKey && encKey.length < 32) {
+    console.warn(
+      `\x1b[33m[CONFIG WARNING] ENCRYPTION_KEY is only ${encKey.length} chars. ` +
+      '32+ characters are strongly recommended for adequate entropy.\x1b[0m'
+    );
+  }
+
   if (!isSet(process.env.FRONTEND_URL)) {
     console.warn(
       '\x1b[33m[CONFIG WARNING] FRONTEND_URL is not set. CORS and email links may not work as expected.\x1b[0m'
