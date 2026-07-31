@@ -15,6 +15,10 @@ function isSet(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+function isAmlConfigured() {
+  return isSet(process.env.AML_PROVIDER) && isSet(process.env.AML_API_KEY);
+}
+
 /**
  * Validates required configuration before the server listens.
  * Never logs secret values — only variable names.
@@ -52,6 +56,13 @@ function validateEnv() {
   if (!isSet(process.env.FRONTEND_URL)) {
     console.warn(
       '\x1b[33m[CONFIG WARNING] FRONTEND_URL is not set. CORS and email links may not work as expected.\x1b[0m'
+    );
+  }
+
+  if (process.env.NODE_ENV === 'production' && !isAmlConfigured()) {
+    console.warn(
+      '\x1b[33m[CONFIG WARNING] AML/sanctions screening is NOT configured (set AML_PROVIDER and AML_API_KEY). ' +
+      'KYC wallets will be flagged as not_screened and high-value payments (>= $1000 USD) will be BLOCKED.\x1b[0m'
     );
   }
 

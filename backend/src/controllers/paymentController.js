@@ -30,6 +30,7 @@ const { getActiveConfig } = require("../services/feeConfigService");
 const logger = require("../utils/logger");
 const { cancelEscrow } = require("../services/agentEscrow");
 const audit = require("../services/audit");
+const { amlRescreenForPayment } = require("./kycController");
 
 const KYC_THRESHOLD_USD = parseFloat(process.env.KYC_THRESHOLD_USD || "100");
 
@@ -390,6 +391,9 @@ async function send(req, res, next) {
       return res.status(400).json({ error: "Cannot send payment to your own wallet" });
     }
 
+    // AML re-screen for high-value payments — fail closed when screening is unavailable
+    await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD);
+
     // Use a per-wallet distributed lock to prevent concurrent sends from
     // racing past the daily-limit check (issue #888).
     const lockKey = `daily_limit:${public_key}`;
@@ -595,6 +599,9 @@ async function sendBatch(req, res, next) {
 
     ({ public_key } = wallet);
     const { encrypted_secret_key } = wallet;
+
+    // AML re-screen for high-value batches — fail closed when screening is unavailable
+    await amlRescreenForPayment(req.user.userId, public_key, estimateUSDValue(totalAmount, asset));
 
     const overLimit = await dailyLimitExceeded(public_key, totalAmount);
     if (overLimit) {
@@ -862,6 +869,9 @@ async function sendPath(req, res, next) {
 
     if (recipient_address === public_key) return res.status(400).json({ error: "Cannot send payment to your own wallet" });
 
+    // AML re-screen for high-value payments — fail closed when screening is unavailable
+    await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD);
+
     const fraudCheck = await checkFraud(public_key, source_amount, source_asset);
     if (fraudCheck.blocked) {
       await logFraudBlock(public_key, fraudCheck.reason, source_amount, source_asset);
@@ -969,6 +979,9 @@ async function sendStrictReceivePath(req, res, next) {
     const { encrypted_secret_key } = walletResult.rows[0];
 
     if (recipient_address === public_key) return res.status(400).json({ error: "Cannot send payment to your own wallet" });
+
+    // AML re-screen for high-value payments — fail closed when screening is unavailable
+    await amlRescreenForPayment(req.user.userId, public_key, estimatedUSD);
 
     const fraudCheck = await checkFraud(public_key, source_max_amount, source_asset);
     if (fraudCheck.blocked) {
