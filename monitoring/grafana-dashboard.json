@@ -168,6 +168,30 @@
           "legendFormat": "Email Queue Depth"
         }
       ]
+    },
+    {
+      "title": "AML Screening Coverage (%)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 40, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "afripay_aml_screening_coverage_ratio * 100",
+          "legendFormat": "screened %"
+        }
+      ]
+    },
+    {
+      "title": "AML Screening Decisions (by status)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 40, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(afripay_aml_screenings_total[5m]))",
+          "legendFormat": "{{status}}"
+        }
+      ]
     }
   ]
 }

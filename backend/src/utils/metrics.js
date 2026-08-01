@@ -69,6 +69,19 @@ const emailQueueDepth = new client.Gauge({
   registers: [registry],
 });
 
+const amlScreeningsTotal = new client.Counter({
+  name: 'afripay_aml_screenings_total',
+  help: 'Total AML screening decisions, labelled by outcome (clear, flagged, error, not_screened)',
+  labelNames: ['status'],
+  registers: [registry],
+});
+
+const amlScreeningCoverageGauge = new client.Gauge({
+  name: 'afripay_aml_screening_coverage_ratio',
+  help: 'Ratio of AML screening attempts performed by a real provider vs total attempts (provider screens + passthrough)',
+  registers: [registry],
+});
+
 module.exports = {
   registry,
   httpRequestDuration,
@@ -80,4 +93,6 @@ module.exports = {
   afripayHorizonDuration,
   activeUsers,
   emailQueueDepth,
+  amlScreeningsTotal,
+  amlScreeningCoverageGauge,
 };
