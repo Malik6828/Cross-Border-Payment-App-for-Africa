@@ -11,10 +11,8 @@
  */
 
 const StellarSdk = require("@stellar/stellar-sdk");
-const crypto = require("crypto");
 
-const ALGORITHM = "aes-256-cbc";
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
 const isTestnet = process.env.STELLAR_NETWORK !== "mainnet";
 const networkPassphrase = isTestnet
@@ -34,14 +32,7 @@ function getRpc() {
 }
 
 function decryptSecret(encryptedKey) {
-  const [ivHex, encrypted] = encryptedKey.split(":");
-  const iv = Buffer.from(ivHex, "hex");
-  const decipher = crypto.createDecipheriv(
-    ALGORITHM,
-    Buffer.from(ENCRYPTION_KEY),
-    iv
-  );
-  return decipher.update(encrypted, "hex", "utf8") + decipher.final("utf8");
+  return decryptAesCbc(encryptedKey);
 }
 
 function requireContractId() {
