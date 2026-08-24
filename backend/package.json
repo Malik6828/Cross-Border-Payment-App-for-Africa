@@ -11,8 +11,8 @@
     "lint:fix": "eslint . --ext .js --fix",
     "format": "prettier --write '**/*.{js,json,md}'",
     "format:check": "prettier --check '**/*.{js,json,md}'",
-    "migrate": "node-pg-migrate -m ../database/migrations up",
-    "migrate:rollback": "node-pg-migrate -m ../database/migrations down 1",
+    "migrate": "node-pg-migrate -m ../database/migrations --ignore-pattern \"\\\\.md$\" up",
+    "migrate:rollback": "node-pg-migrate -m ../database/migrations --ignore-pattern \"\\\\.md$\" down 1",
     "depcheck": "depcheck --ignores='swagger-jsdoc,swagger-ui-express,nodemon' --ignore-dirs='__mocks__,coverage'"
   },
   "dependencies": {
