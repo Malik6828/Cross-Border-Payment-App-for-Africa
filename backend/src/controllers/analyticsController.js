@@ -1,4 +1,17 @@
+/**
+ * Analytics Controller
+ *
+ * `volume` reads from the daily_payment_aggregates materialized view for
+ * ranges longer than 7 days (see 026_analytics_materialized_view.js); that
+ * view refreshes hourly by default (CRON_ANALYTICS_REFRESH, see
+ * backend/src/scheduler.js) or on demand via POST /api/analytics/refresh.
+ * Every response includes `refreshed_at` so callers know exactly how stale
+ * the data is — see backend/src/services/analyticsRefresh.js for details.
+ * `summary` and `fees` always query the live transactions table, so their
+ * `refreshed_at` is just the request time.
+ */
 const db = require('../db');
+const { refreshDailyAggregates, getLastRefreshedAt } = require('../services/analyticsRefresh');
 
 exports.summary = async (req, res) => {
   try {
@@ -70,6 +83,7 @@ exports.summary = async (req, res) => {
       top_recipients: topRecipients.rows,
       asset_breakdown: assetBreakdown.rows,
       transaction_frequency: frequency.rows,
+      refreshed_at: new Date().toISOString(), // live query — always current
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -95,6 +109,7 @@ exports.volume = async (req, res) => {
     const rangeDays = Math.ceil((to - from) / (1000 * 60 * 60 * 24));
 
     let rows;
+    let refreshedAt;
 
     if (rangeDays > 7) {
       // Use the pre-aggregated materialized view for longer ranges to avoid full table scans
@@ -121,6 +136,7 @@ exports.volume = async (req, res) => {
         [from, to],
       );
       rows = result.rows;
+      refreshedAt = (await getLastRefreshedAt()) || null;
     } else {
       // Live query for short ranges (≤ 7 days); generate_series fills zero-count days
       const result = await db.query(
@@ -155,12 +171,14 @@ exports.volume = async (req, res) => {
         [from, to],
       );
       rows = result.rows;
+      refreshedAt = new Date().toISOString(); // live query — always current
     }
 
     res.json({
       period: { from: from.toISOString(), to: to.toISOString() },
       range_days: rangeDays,
       volume: rows,
+      refreshed_at: refreshedAt,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -209,7 +227,24 @@ exports.fees = async (req, res) => {
       total_fees: totals.rows[0].total_fees,
       transaction_count: totals.rows[0].transaction_count,
       by_asset: byAsset.rows,
+      refreshed_at: new Date().toISOString(), // live query — always current
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * POST /api/analytics/refresh
+ * Admin-only: triggers an immediate REFRESH MATERIALIZED VIEW CONCURRENTLY
+ * for daily_payment_aggregates, ahead of the scheduled cadence. Useful right
+ * after a data correction (e.g. reversing a fraudulent transaction) where an
+ * admin doesn't want to wait for the next scheduled refresh.
+ */
+exports.refresh = async (req, res) => {
+  try {
+    const refreshedAt = await refreshDailyAggregates();
+    res.json({ message: 'daily_payment_aggregates refreshed', refreshed_at: refreshedAt });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

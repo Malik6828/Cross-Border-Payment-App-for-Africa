@@ -1,9 +1,9 @@
-const crypto = require('crypto');
 const https = require('https');
 const db = require('../db');
 const logger = require('../utils/logger');
 const { isPrivateIp } = require('../utils/ssrfValidator');
 const { decryptSecret } = require('../utils/symmetricEncryption');
+const { sign, buildSignatureHeader } = require('../utils/webhookSignature');
 
 const MAX_ATTEMPTS = 3;
 
@@ -41,10 +41,6 @@ async function isPublicHttpsUrl(url) {
   }
 
   return true;
-}
-
-function sign(secret, payload) {
-  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
 }
 
 function httpsPost(url, body, signature) {
@@ -90,7 +86,19 @@ async function updateDeliveryLog(deliveryId, status, statusCode, responseTimeMs,
   );
 }
 
-async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
+// Build the list of plaintext secrets a delivery should be signed with: the
+// current secret, plus the previous one if it's still inside its rotation
+// overlap window — lets a merchant who hasn't rolled their verification key
+// yet keep validating deliveries sent right after a rotation.
+function activeSecrets(row) {
+  const secrets = [decryptSecret(row.secret)];
+  if (row.previous_secret && row.previous_secret_expires_at && new Date(row.previous_secret_expires_at) > new Date()) {
+    secrets.push(decryptSecret(row.previous_secret));
+  }
+  return secrets;
+}
+
+async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
   // Re-validate URL before each delivery to catch DNS rebinding / stale records
   if (!await isPublicHttpsUrl(url)) {
     logger.error('Webhook delivery blocked: URL failed SSRF validation', { url });
@@ -99,7 +107,7 @@ async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
     return;
   }
   const body = JSON.stringify(payload);
-  const signature = sign(secret, body);
+  const signature = buildSignatureHeader(secrets, body);
   const deliveryId = await createDeliveryLog(webhookId, payload.event, url, attempt + 1, MAX_ATTEMPTS, payload);
   const start = Date.now();
   try {
@@ -120,7 +128,7 @@ async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
         error: err.message,
       });
       await new Promise((r) => setTimeout(r, delay));
-      return deliverWithRetry(webhookId, url, secret, payload, attempt + 1);
+      return deliverWithRetry(webhookId, url, secrets, payload, attempt + 1);
     }
     // All attempts exhausted
     await updateDeliveryLog(deliveryId, 'failed', statusCode, responseTime, err.message);
@@ -135,29 +143,28 @@ async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
 
 async function retryDelivery(deliveryId) {
   const { rows } = await db.query(
-    `SELECT wd.webhook_id, wd.target_url, wd.payload, wd.event_type, w.url, w.secret
+    `SELECT wd.webhook_id, wd.target_url, wd.payload, wd.event_type,
+            w.url, w.secret, w.previous_secret, w.previous_secret_expires_at
      FROM webhook_deliveries wd
      JOIN webhooks w ON w.id = wd.webhook_id
      WHERE wd.id = $1 AND wd.status = 'failed'`,
     [deliveryId]
   );
   if (!rows.length) throw new Error('Delivery not found or not failed');
-  const { url, secret, payload, event_type } = rows[0];
-  const parsedPayload = typeof payload === 'string' ? JSON.parse(payload) : payload;
-  await deliverWithRetry(null, url, secret, { ...parsedPayload, event: event_type });
+  const row = rows[0];
+  const parsedPayload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+  await deliverWithRetry(row.webhook_id, row.url, activeSecrets(row), { ...parsedPayload, event: row.event_type });
 }
 
 async function deliver(event, data) {
   const { rows } = await db.query(
-    `SELECT id, url, secret FROM webhooks WHERE active = true AND $1 = ANY(events)`,
+    `SELECT id, url, secret, previous_secret, previous_secret_expires_at
+     FROM webhooks WHERE active = true AND $1 = ANY(events)`,
     [event]
   );
   const timestamp = Math.floor(Date.now() / 1000);
   const payload = { timestamp, event, data };
-  await Promise.all(rows.map((wh) => {
-    const plainSecret = decryptSecret(wh.secret);
-    return deliverWithRetry(wh.url, plainSecret, payload);
-  }));
+  await Promise.all(rows.map((wh) => deliverWithRetry(wh.id, wh.url, activeSecrets(wh), payload)));
 }
 
 module.exports = { deliver, sign, retryDelivery, MAX_ATTEMPTS };

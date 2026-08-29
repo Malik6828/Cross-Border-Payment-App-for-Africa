@@ -23,7 +23,7 @@ const { checkFraud, logFraudBlock } = require("../services/fraudDetection");
 const { parseHistoryFrom, parseHistoryTo, normalizeAsset, validateDateRange } = require("../utils/historyQuery");
 const { isMemoRequired } = require("../services/memoRequired");
 const { awardReferralCredit } = require("./referralController");
-const { mintPoints } = require("../services/loyaltyToken");
+const { enqueueMint } = require("../services/loyaltyMintQueue");
 const { depositFee } = require("../services/feeDistributor");
 const logger = require("../utils/logger");
 
@@ -350,7 +350,9 @@ async function send(req, res, next) {
     }
 
     const loyaltyPoints = Math.max(1, Math.floor(parseFloat(amount)));
-    mintPoints({ recipientWallet: public_key, points: loyaltyPoints }).catch(() => {});
+    enqueueMint({ userId: req.user.userId, walletAddress: public_key, points: loyaltyPoints }).catch((err) => {
+      logger.error('Failed to enqueue loyalty mint', { userId: req.user.userId, error: err.message });
+    });
 
     const PLATFORM_FEE_BPS = parseInt(process.env.PLATFORM_FEE_BPS || "250", 10);
     if (asset === "USDC" && PLATFORM_FEE_BPS > 0) {
