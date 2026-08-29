@@ -6,7 +6,7 @@ const { createWallet, encryptPrivateKey, addTrustline } = require('../services/s
 const audit = require('../services/audit');
 const logger = require('../utils/logger');
 const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
-const { sendVerificationEmail, sendPasswordResetEmail, sendBackupCodeWarningEmail } = require('../services/email');
+const { sendVerificationEmail, sendPasswordResetEmail, sendBackupCodeWarningEmail, sendEmailChangeRequestedNotice } = require('../services/email');
 const { generateSecret, verifyToken, generateBackupCodes, useBackupCode, hashBackupCode, verifyBackupCode } = require('../services/twofa');
 const {
   COOKIE_NAME,
@@ -915,6 +915,7 @@ async function changeEmail(req, res, next) {
     );
 
     await sendVerificationEmail(new_email, raw);
+    await sendEmailChangeRequestedNotice(user.email, new_email, req.ip, req.headers['user-agent']);
 
     audit.log(userId, 'email_change_requested', req.ip, req.headers['user-agent'], { new_email });
     res.json({ message: 'Verification email sent to new address. Check your inbox to confirm the change.' });

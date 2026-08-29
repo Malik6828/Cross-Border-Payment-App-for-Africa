@@ -24,3 +24,6 @@ unprefixed — both were tried historically in this folder and led to
 duplicate prefixes and non-deterministic ordering (fixed in this repo via
 a full rename to timestamp prefixes, preserved through `git mv` so file
 history/blame is intact — see git log).
+
+CI enforces this: `backend/scripts/check-migration-prefixes.js` fails the
+build if any two migration files share a numeric prefix.

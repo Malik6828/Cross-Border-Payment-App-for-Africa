@@ -82,6 +82,20 @@ const amlScreeningCoverageGauge = new client.Gauge({
   registers: [registry],
 });
 
+const rateLimiterDegraded = new client.Gauge({
+  name: 'afripay_rate_limiter_degraded',
+  help: 'Whether a rate limiter has fallen back to per-process in-memory limiting (1) or is using shared Redis (0), labelled by limiter prefix',
+  labelNames: ['prefix'],
+  registers: [registry],
+});
+
+const rateLimiterRedisFailuresTotal = new client.Counter({
+  name: 'afripay_rate_limiter_redis_failures_total',
+  help: 'Total times the rate limiter Redis store was unavailable, labelled by prefix and reason',
+  labelNames: ['prefix', 'reason'],
+  registers: [registry],
+});
+
 module.exports = {
   registry,
   httpRequestDuration,
@@ -95,4 +109,6 @@ module.exports = {
   emailQueueDepth,
   amlScreeningsTotal,
   amlScreeningCoverageGauge,
+  rateLimiterDegraded,
+  rateLimiterRedisFailuresTotal,
 };
