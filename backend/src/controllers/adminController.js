@@ -783,6 +783,8 @@ async function bulkSuspend(req, res, next) {
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
+    // Prevent long-running locks from degrading the platform under large batches
+    await client.query("SET LOCAL statement_timeout = '10s'");
     const { rows: affectedUsers } = await client.query(
       `UPDATE users SET is_suspended = true, suspension_reason = $1, suspended_at = NOW()
        WHERE id = ANY($2::uuid[]) AND is_suspended = false
@@ -820,6 +822,8 @@ async function bulkUnsuspend(req, res, next) {
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
+    // Prevent long-running locks from degrading the platform under large batches
+    await client.query("SET LOCAL statement_timeout = '10s'");
     const { rows: affectedUsers } = await client.query(
       `UPDATE users SET is_suspended = false, suspension_reason = NULL, suspended_at = NULL
        WHERE id = ANY($1::uuid[]) AND is_suspended = true
@@ -852,15 +856,25 @@ async function bulkUnsuspend(req, res, next) {
 async function bulkExport(req, res, next) {
   if (!validateBulkRequest(req, res)) return;
   const { userIds } = req.body;
+  const client = await db.pool.connect();
   try {
-    const { rows } = await db.query(
+    await client.query('BEGIN');
+    // Prevent long-running locks on the export_jobs table during large batches
+    await client.query("SET LOCAL statement_timeout = '10s'");
+    const { rows } = await client.query(
       `INSERT INTO export_jobs (admin_id, status, operation, filters)
        VALUES ($1, 'pending', 'bulk_export', $2) RETURNING id`,
       [req.user.userId, JSON.stringify({ userIds })]
     );
+    await client.query('COMMIT');
     const jobId = rows[0].id;
-    await audit.log(req.user.userId, 'bulk_export_queued', req.ip, req.headers['user-agent'],
-      { user_count: userIds.length, job_id: jobId });
+
+    // Structured audit log including batch size and requesting admin
+    await audit.auditLog(req, 'bulk_export_queued', {
+      type: 'bulk_user',
+      id: jobId,
+      newValue: { user_count: userIds.length, job_id: jobId },
+    });
 
     // Process async (fire-and-forget)
     processBulkExportJob(jobId, userIds).catch(err =>
@@ -870,7 +884,10 @@ async function bulkExport(req, res, next) {
 
     res.status(202).json({ jobId, message: 'Export job queued' });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     next(err);
+  } finally {
+    client.release();
   }
 }
 

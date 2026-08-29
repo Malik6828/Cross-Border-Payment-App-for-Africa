@@ -189,6 +189,7 @@ async function login(req, res, next) {
 
     const user = result.rows[0];
     const now = new Date();
+    // Lockout configuration — single source of truth for threshold and windows
     const LOCKOUT_DURATION_MINUTES = 15;
     const MAX_FAILED_ATTEMPTS = 5;
     const ATTEMPT_WINDOW_MINUTES = 15;
@@ -202,7 +203,7 @@ async function login(req, res, next) {
           locked_until: lockUntil.toISOString(),
         });
       }
-      // Lock has expired — reset counters
+      // Lock has expired — reset counters atomically before proceeding
       await db.query(
         `UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_failed_attempt_at = NULL WHERE id = $1`,
         [user.id]
@@ -216,36 +217,55 @@ async function login(req, res, next) {
     const isValidPassword = user && (await bcrypt.compare(password, user.password_hash));
     if (!user || !isValidPassword) {
       if (user) {
-        const lastAttempt = user.last_failed_attempt_at ? new Date(user.last_failed_attempt_at) : null;
+        // Atomic increment: use a single UPDATE...RETURNING so concurrent failed
+        // logins on the same account never lose an increment (fixes #954).
+        // If the last attempt was outside the window, reset the counter to 1
+        // atomically in the same statement.
         const ATTEMPT_WINDOW_MS = ATTEMPT_WINDOW_MINUTES * 60 * 1000;
-        let failedAttempts = user.failed_login_attempts || 0;
+        const lockoutDurationMs = LOCKOUT_DURATION_MINUTES * 60 * 1000;
 
-        if (lastAttempt && (now - lastAttempt) > ATTEMPT_WINDOW_MS) {
-          failedAttempts = 0;
-        }
-        failedAttempts++;
+        const atomicResult = await db.query(
+          `UPDATE users
+           SET
+             failed_login_attempts = CASE
+               WHEN last_failed_attempt_at IS NULL
+                    OR (EXTRACT(EPOCH FROM (NOW() - last_failed_attempt_at)) * 1000) > $1
+               THEN 1
+               ELSE failed_login_attempts + 1
+             END,
+             last_failed_attempt_at = NOW(),
+             locked_until = CASE
+               WHEN (
+                 CASE
+                   WHEN last_failed_attempt_at IS NULL
+                        OR (EXTRACT(EPOCH FROM (NOW() - last_failed_attempt_at)) * 1000) > $1
+                   THEN 1
+                   ELSE failed_login_attempts + 1
+                 END
+               ) >= $2
+               THEN NOW() + ($3 * INTERVAL '1 millisecond')
+               ELSE locked_until
+             END
+           WHERE id = $4
+           RETURNING failed_login_attempts, locked_until`,
+          [ATTEMPT_WINDOW_MS, MAX_FAILED_ATTEMPTS, lockoutDurationMs, user.id]
+        );
 
-        if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
-          const lockedUntil = new Date(now.getTime() + LOCKOUT_DURATION_MINUTES * 60 * 1000);
-          await db.query(
-            `UPDATE users SET failed_login_attempts = $1, locked_until = $2, last_failed_attempt_at = $3 WHERE id = $4`,
-            [failedAttempts, lockedUntil, now, user.id]
-          );
+        const updated = atomicResult.rows[0];
+        const failedAttempts = updated.failed_login_attempts;
+
+        if (updated.locked_until && new Date(updated.locked_until) > now) {
           audit.log(user.id, 'account_locked', req.ip, req.headers['user-agent'], {
             reason: 'excessive_failed_login_attempts',
             attempts: failedAttempts,
-            locked_until: lockedUntil.toISOString(),
+            locked_until: new Date(updated.locked_until).toISOString(),
           });
           return res.status(423).json({
-            error: `Account locked due to too many failed login attempts. Try again after ${lockedUntil.toISOString()}`,
-            locked_until: lockedUntil.toISOString(),
+            error: `Account locked due to too many failed login attempts. Try again after ${new Date(updated.locked_until).toISOString()}`,
+            locked_until: new Date(updated.locked_until).toISOString(),
           });
         }
 
-        await db.query(
-          `UPDATE users SET failed_login_attempts = $1, last_failed_attempt_at = $2 WHERE id = $3`,
-          [failedAttempts, now, user.id]
-        );
         audit.log(user.id, 'login_failure', req.ip, req.headers['user-agent'], {
           failed_attempts: failedAttempts,
           attempts_remaining: MAX_FAILED_ATTEMPTS - failedAttempts,
