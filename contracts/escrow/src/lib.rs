@@ -4,7 +4,7 @@ use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, 
 mod test;
 
 /// Semantic version of this contract. Bumped on every upgrade.
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 
 #[derive(Clone)]
 #[contracttype]
@@ -44,6 +44,32 @@ pub struct EscrowCancelled {
 
 #[derive(Clone)]
 #[contracttype]
+pub struct EscrowExpired {
+    pub escrow_id: u64,
+    pub sender: Address,
+    pub refund_amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct EscrowBatchCreated {
+    pub batch_size: u32,
+    pub first_escrow_id: u64,
+    pub last_escrow_id: u64,
+    pub total_amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct EscrowParams {
+    pub recipient: Address,
+    pub agent: Address,
+    pub amount: i128,
+    pub release_fee_bps: u32,
+}
+
+#[derive(Clone)]
+#[contracttype]
 pub struct DeliveryConfirmed {
     pub escrow_id: u64,
     pub agent: Address,
@@ -68,6 +94,12 @@ pub struct EscrowArchived {
 #[contracttype]
 pub struct Upgraded {
     pub new_wasm_hash: BytesN<32>,
+    pub contract_version: u32,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct Migrated {
     pub contract_version: u32,
 }
 
@@ -127,16 +159,23 @@ pub enum DataKey {
     AccumulatedFees,
     RetentionPeriodSecs,
     Escrow(u64),
+    KycContractAddress,
+    ContractVersion,
 }
 
 const DEFAULT_EXPIRY_SECS: u64 = 30 * 24 * 60 * 60;
 const DEFAULT_RETENTION_SECS: u64 = 90 * 24 * 60 * 60;
 
-/// Maximum allowed fee: 50% (5000 bps). Configurable by admin via contract upgrade.
-const MAX_FEE_BPS: u32 = 5000;
+/// Maximum allowed fee: 10% (1000 bps) per issue #766.
+const MAX_FEE_BPS: u32 = 1000;
 
 /// Minimum escrow amount in stroops to prevent integer-division rounding to zero fee.
 const MIN_ESCROW_AMOUNT: i128 = 100;
+
+// SECURITY: i128 max is ~170 trillion USDC in stroops (1.7 * 10^20).
+// MAX_ESCROW_AMOUNT = 1,000,000 USDC = 10_000_000_000_000 stroops.
+// Intermediate fee calc uses (amount / 10000).saturating_mul(bps) to prevent overflow.
+const MAX_ESCROW_AMOUNT: i128 = 10_000_000_000_000;
 
 fn require_admin(env: &Env, admin: &Address) {
     admin.require_auth();
@@ -155,6 +194,33 @@ fn retention_period(env: &Env) -> u64 {
         .persistent()
         .get(&DataKey::RetentionPeriodSecs)
         .unwrap_or(DEFAULT_RETENTION_SECS)
+}
+
+/// Helper function to check KYC verification via cross-contract call.
+/// Returns true if KYC is verified or if KYC checking is disabled (zero address).
+fn is_kyc_verified(env: &Env, wallet: &Address) -> bool {
+    let kyc_contract: Option<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::KycContractAddress);
+
+    match kyc_contract {
+        None => true, // KYC checking disabled
+        Some(addr) => {
+            // Check if address is zero (all bytes are 0)
+            let zero_addr = Address::from_contract_id(env, &[0u8; 32]);
+            if addr == zero_addr {
+                true // KYC checking disabled
+            } else {
+                // Cross-contract call to kyc-attestation contract
+                env.invoke_contract::<bool>(
+                    &addr,
+                    &Symbol::new(env, "is_verified"),
+                    soroban_sdk::vec![env, wallet.clone().into_val(env)],
+                )
+            }
+        }
+    }
 }
 
 #[contract]
@@ -178,6 +244,9 @@ impl EscrowContract {
         env.storage().persistent().set(&DataKey::Admin, &admin);
         env.storage().persistent().set(&DataKey::UsdcAddress, &usdc_address);
         env.storage().persistent().set(&DataKey::EscrowCounter, &0u64);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContractVersion, &CONTRACT_VERSION);
         env.events().publish(
             (Symbol::new(&env, "EscrowInitialized"),),
             (env.current_contract_address(), admin, usdc_address),
@@ -214,6 +283,31 @@ impl EscrowContract {
         );
     }
 
+    pub fn migrate(env: Env, admin: Address) {
+        require_admin(&env, &admin);
+
+        let current_version: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(0);
+
+        if current_version >= CONTRACT_VERSION {
+            return;
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::ContractVersion, &CONTRACT_VERSION);
+
+        env.events().publish(
+            (Symbol::new(&env, "Migrated"),),
+            Migrated {
+                contract_version: CONTRACT_VERSION,
+            },
+        );
+    }
+
     pub fn create_escrow(
         env: Env,
         sender: Address,
@@ -225,11 +319,14 @@ impl EscrowContract {
         if amount < MIN_ESCROW_AMOUNT {
             panic!("Amount below minimum (100 stroops)");
         }
+        if amount > MAX_ESCROW_AMOUNT {
+            panic!("Amount exceeds maximum escrow amount");
+        }
         if release_fee_bps == 10000 {
             panic!("Fee cannot be 100%");
         }
         if release_fee_bps > MAX_FEE_BPS {
-            panic!("Fee exceeds maximum of 5000 bps (50%)");
+            panic!("Fee exceeds maximum of 1000 bps (10%)");
         }
         if sender == recipient || sender == agent || recipient == agent {
             panic!("Sender, recipient, and agent must be distinct addresses");
@@ -237,17 +334,19 @@ impl EscrowContract {
 
         sender.require_auth();
 
+        // KYC verification for sender and agent
+        if !is_kyc_verified(&env, &sender) {
+            panic!("KYC verification required for sender");
+        }
+        if !is_kyc_verified(&env, &agent) {
+            panic!("KYC verification required for agent");
+        }
+
         let usdc_address: Address = env
             .storage()
             .persistent()
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
-
-        token::Client::new(&env, &usdc_address).transfer(
-            &sender,
-            &env.current_contract_address(),
-            &amount,
-        );
 
         let current_id: u64 = env
             .storage()
@@ -275,9 +374,20 @@ impl EscrowContract {
             updated_at: now,
             expires_at: now + DEFAULT_EXPIRY_SECS,
         };
+
+        // Checks-Effects-Interactions: write escrow record to storage BEFORE the
+        // token.transfer call (Interactions step).
+        // Soroban prevents re-entrancy by disallowing cross-contract calls that
+        // re-enter the same contract instance within a single transaction invocation.
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(next_id), &escrow);
+
+        token::Client::new(&env, &usdc_address).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &amount,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "EscrowCreated"),),
@@ -364,8 +474,11 @@ impl EscrowContract {
             panic!("Escrow has expired");
         }
 
-        let fee_amount = (escrow.amount * escrow.release_fee_bps as i128) / 10000;
-        let agent_amount = escrow.amount - fee_amount;
+        let fee_amount = (escrow.amount / 10000).saturating_mul(escrow.release_fee_bps as i128);
+        let agent_amount = escrow.amount.checked_sub(fee_amount).expect("fee exceeds escrow amount");
+        if agent_amount <= 0 {
+            panic!("fee cannot exceed 100% of escrow");
+        }
 
         let usdc_address: Address = env
             .storage()
@@ -373,12 +486,9 @@ impl EscrowContract {
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
-        token::Client::new(&env, &usdc_address).transfer(
-            &env.current_contract_address(),
-            &escrow.agent,
-            &agent_amount,
-        );
-
+        // Checks-Effects-Interactions: update state BEFORE external token calls.
+        // Soroban prevents re-entrancy by disallowing cross-contract calls that
+        // re-enter the same contract instance within a single transaction invocation.
         let current_fees: i128 = env
             .storage()
             .persistent()
@@ -393,6 +503,13 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        // External calls after state is committed (Interactions step).
+        token::Client::new(&env, &usdc_address).transfer(
+            &env.current_contract_address(),
+            &escrow.agent,
+            &agent_amount,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "EscrowReleased"),),
@@ -461,8 +578,11 @@ impl EscrowContract {
             panic!("Release amount exceeds escrow balance");
         }
 
-        let fee_amount = (amount * escrow.release_fee_bps as i128) / 10000;
-        let agent_amount = amount - fee_amount;
+        let fee_amount = (amount / 10000).saturating_mul(escrow.release_fee_bps as i128);
+        let agent_amount = amount.checked_sub(fee_amount).expect("fee exceeds release amount");
+        if agent_amount <= 0 {
+            panic!("fee cannot exceed 100% of escrow");
+        }
 
         let usdc_address: Address = env
             .storage()
@@ -567,17 +687,21 @@ impl EscrowContract {
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
 
-        token::Client::new(&env, &usdc_address).transfer(
-            &env.current_contract_address(),
-            &escrow.sender,
-            &escrow.amount,
-        );
-
+        // Checks-Effects-Interactions: update state BEFORE external token call.
+        // Soroban prevents re-entrancy by disallowing cross-contract calls that
+        // re-enter the same contract instance within a single transaction invocation.
         escrow.status = EscrowStatus::Cancelled;
         escrow.updated_at = env.ledger().timestamp();
         env.storage()
             .persistent()
             .set(&DataKey::Escrow(escrow_id), &escrow);
+
+        // External call after state is committed (Interactions step).
+        token::Client::new(&env, &usdc_address).transfer(
+            &env.current_contract_address(),
+            &escrow.sender,
+            &escrow.amount,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "EscrowCancelled"),),
@@ -602,7 +726,7 @@ impl EscrowContract {
         }
 
         let now = env.ledger().timestamp();
-        if now < escrow.expires_at {
+        if now <= escrow.expires_at {
             panic!("Escrow has not expired yet");
         }
 
@@ -627,8 +751,8 @@ impl EscrowContract {
             (Symbol::new(&env, "EscrowExpired"),),
             EscrowExpired {
                 escrow_id,
+                sender: escrow.sender.clone(),
                 refund_amount: escrow.amount,
-                expired_at: now,
             },
         );
     }
@@ -751,6 +875,13 @@ impl EscrowContract {
         );
     }
 
+    pub fn get_contract_version(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ContractVersion)
+            .unwrap_or(0)
+    }
+
     pub fn get_metadata(env: Env) -> (Address, Address) {
         let admin: Address = env
             .storage()
@@ -763,5 +894,146 @@ impl EscrowContract {
             .get(&DataKey::UsdcAddress)
             .expect("Contract not initialized");
         (admin, usdc_address)
+    }
+
+    /// Batch create multiple escrows in a single transaction.
+    ///
+    /// # Arguments
+    /// * `sender`  — Payer; must authorise this call.
+    /// * `escrows` — Vector of escrow parameters (max 20).
+    ///
+    /// # Returns
+    /// First escrow ID created.
+    ///
+    /// # Panics
+    /// * If batch size exceeds 20
+    /// * If any escrow has invalid parameters
+    /// * If sender doesn't have sufficient USDC for total amount
+    pub fn batch_create_escrow(
+        env: Env,
+        sender: Address,
+        escrows: soroban_sdk::Vec<EscrowParams>,
+    ) -> u64 {
+        sender.require_auth();
+
+        let batch_size = escrows.len();
+        if batch_size > 20 {
+            panic!("Batch size exceeds maximum of 20");
+        }
+        if batch_size == 0 {
+            panic!("Batch cannot be empty");
+        }
+
+        // Validate all escrows before creating any
+        let mut total_amount: i128 = 0;
+        for escrow_params in escrows.iter() {
+            if escrow_params.amount < MIN_ESCROW_AMOUNT {
+                panic!("Amount below minimum (100 stroops)");
+            }
+            if escrow_params.amount > MAX_ESCROW_AMOUNT {
+                panic!("Amount exceeds maximum escrow amount");
+            }
+            if escrow_params.release_fee_bps == 10000 {
+                panic!("Fee cannot be 100%");
+            }
+            if escrow_params.release_fee_bps > MAX_FEE_BPS {
+                panic!("Fee exceeds maximum of 1000 bps (10%)");
+            }
+            if sender == escrow_params.recipient
+                || sender == escrow_params.agent
+                || escrow_params.recipient == escrow_params.agent
+            {
+                panic!("Sender, recipient, and agent must be distinct addresses");
+            }
+            total_amount += escrow_params.amount;
+        }
+
+        // Transfer total USDC once
+        let usdc_address: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcAddress)
+            .expect("Contract not initialized");
+
+        token::Client::new(&env, &usdc_address).transfer(
+            &sender,
+            &env.current_contract_address(),
+            &total_amount,
+        );
+
+        // Create all escrows
+        let mut current_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EscrowCounter)
+            .unwrap_or(0);
+
+        let first_id = current_id + 1;
+        let now = env.ledger().timestamp();
+
+        for escrow_params in escrows.iter() {
+            let next_id = current_id.checked_add(1).expect("Escrow counter overflow");
+            current_id = next_id;
+
+            let escrow = Escrow {
+                id: next_id,
+                sender: sender.clone(),
+                recipient: escrow_params.recipient.clone(),
+                agent: escrow_params.agent.clone(),
+                amount: escrow_params.amount,
+                release_fee_bps: escrow_params.release_fee_bps,
+                status: EscrowStatus::Pending,
+                payout_confirmed: false,
+                created_at: now,
+                updated_at: now,
+                expires_at: now + DEFAULT_EXPIRY_SECS,
+            };
+
+            env.storage()
+                .persistent()
+                .set(&DataKey::Escrow(next_id), &escrow);
+
+            env.events().publish(
+                (Symbol::new(&env, "EscrowCreated"),),
+                EscrowCreated {
+                    escrow_id: next_id,
+                    sender: sender.clone(),
+                    recipient: escrow_params.recipient.clone(),
+                    agent: escrow_params.agent.clone(),
+                    amount: escrow_params.amount,
+                    release_fee_bps: escrow_params.release_fee_bps,
+                },
+            );
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::EscrowCounter, &current_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "EscrowBatchCreated"),),
+            EscrowBatchCreated {
+                batch_size: batch_size as u32,
+                first_escrow_id: first_id,
+                last_escrow_id: current_id,
+                total_amount,
+            },
+        );
+
+        first_id
+    /// Set the KYC contract address. Only admin may call this.
+    /// Pass a zero address (all bytes 0) to disable KYC checking.
+    pub fn set_kyc_contract(env: Env, admin: Address, kyc_contract: Address) {
+        require_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::KycContractAddress, &kyc_contract);
+    }
+
+    /// Get the KYC contract address, or None if not set.
+    pub fn get_kyc_contract(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::KycContractAddress)
     }
 }

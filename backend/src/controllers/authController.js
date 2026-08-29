@@ -6,8 +6,8 @@ const { createWallet, encryptPrivateKey, addTrustline } = require('../services/s
 const audit = require('../services/audit');
 const logger = require('../utils/logger');
 const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
-const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
-const { generateSecret, verifyToken, generateBackupCodes } = require('../services/twofa');
+const { sendVerificationEmail, sendPasswordResetEmail, sendBackupCodeWarningEmail, sendEmailChangeRequestedNotice } = require('../services/email');
+const { generateSecret, verifyToken, generateBackupCodes, useBackupCode, hashBackupCode, verifyBackupCode } = require('../services/twofa');
 const {
   COOKIE_NAME,
   COOKIE_OPTIONS,
@@ -21,8 +21,9 @@ const { setCsrfCookie } = require('../middleware/csrf');
 const cache = require('../utils/cache');
 
 const { sendOTP } = require('../services/sms');
-const { recordSession } = require('./sessionController');
+const { recordSession, invalidateOtherSessions } = require('./sessionController');
 
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — email verification tokens
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const PHONE_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -123,17 +124,27 @@ async function register(req, res, next) {
     const { raw: otpRaw, hashed: otpHashed } = phone ? generatePhoneOTP() : { raw: null, hashed: null };
     const otpExpiresAt = phone ? new Date(Date.now() + PHONE_OTP_TTL_MS) : null;
 
-    await db.query('BEGIN');
-    await db.query(
-      `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
-       VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
-      [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
-    );
-    await db.query(
-      `INSERT INTO wallets (id, user_id, public_key, encrypted_secret_key) VALUES ($1,$2,$3,$4)`,
-      [uuidv4(), userId, publicKey, encryptedSecretKey]
-    );
-    await db.query('COMMIT');
+    // Acquire a dedicated client so BEGIN/COMMIT are scoped to a single connection.
+    // If the wallet INSERT fails the ROLLBACK will undo the user INSERT too.
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
+         VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
+        [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
+      );
+      await client.query(
+        `INSERT INTO wallets (id, user_id, public_key, encrypted_secret_key) VALUES ($1,$2,$3,$4)`,
+        [uuidv4(), userId, publicKey, encryptedSecretKey]
+      );
+      await client.query('COMMIT');
+    } catch (clientErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw clientErr;
+    } finally {
+      client.release();
+    }
 
     // Auto-add USDC trustline so new accounts can receive USDC immediately
     let trustline_status = 'skipped';
@@ -150,7 +161,6 @@ async function register(req, res, next) {
 
     await sendVerificationEmail(email, raw);
 
-    res.status(201).json({ message: 'Account created. Please verify your email before logging in.' });
     if (phone && otpRaw) {
       sendOTP(phone, otpRaw).catch(e => logger.warn('Registration OTP SMS failed', { error: e.message }));
     }
@@ -159,7 +169,6 @@ async function register(req, res, next) {
       trustline_status,
     });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
     next(err);
   }
 }
@@ -249,23 +258,47 @@ async function login(req, res, next) {
       return res.status(403).json({ error: 'Please verify your email before logging in.' });
     }
 
-    // 2FA check — must happen before issuing tokens
+    // Check if 2FA is enabled
     if (user.totp_enabled) {
-      // Check if the incoming device trust token allows skipping TOTP
-      let deviceTrusted = false;
-      if (incomingDeviceToken) {
-        try {
-          const payload = verifyDeviceToken(incomingDeviceToken);
-          deviceTrusted = String(payload.userId) === String(user.id);
-        } catch { /* expired or invalid — fall through to TOTP */ }
+      const { totp_code: totpCode, backup_code } = req.body;
+      if (!totpCode && !backup_code) {
+        return res.status(403).json({ error: 'TOTP code required', requires_2fa: true });
       }
 
-      if (!deviceTrusted) {
-        if (!totp_code) {
-          return res.status(403).json({ error: 'TOTP code required', requires_2fa: true });
+      if (backup_code) {
+        const codes = await db.query(
+          `SELECT id, code_hash FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`,
+          [user.id]
+        );
+        let matchedId = null;
+        for (const row of codes.rows) {
+          if (await verifyBackupCode(backup_code, row.code_hash)) {
+            matchedId = row.id;
+            break;
+          }
         }
-        const isValid = verifyToken(user.totp_secret, totp_code);
-        if (!isValid) {
+        if (!matchedId) {
+          return res.status(401).json({ error: 'BACKUP_CODE_USED' });
+        }
+        await db.query(`UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1`, [matchedId]);
+        const remaining = await db.query(
+          `SELECT COUNT(*) AS count FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`,
+          [user.id]
+        );
+        if (parseInt(remaining.rows[0].count, 10) < 3) {
+          const emailRow = await db.query('SELECT email FROM users WHERE id = $1', [user.id]);
+          sendBackupCodeWarningEmail(emailRow.rows[0].email, parseInt(remaining.rows[0].count, 10)).catch(() => {});
+        }
+      } else {
+        // Device trust token allows skipping TOTP on a previously trusted device.
+        let deviceTrusted = false;
+        if (incomingDeviceToken) {
+          try {
+            const payload = verifyDeviceToken(incomingDeviceToken);
+            deviceTrusted = String(payload.userId) === String(user.id);
+          } catch { /* expired or invalid — require TOTP */ }
+        }
+        if (!deviceTrusted && !verifyToken(user.totp_secret, totpCode)) {
           return res.status(401).json({ error: 'Invalid TOTP code' });
         }
       }
@@ -469,13 +502,63 @@ async function verify2FA(req, res, next) {
       return res.status(401).json({ error: 'Invalid TOTP code' });
     }
 
-    await db.query(
-      `UPDATE users SET totp_enabled = TRUE WHERE id = $1`,
-      [userId]
-    );
+    await db.query(`UPDATE users SET totp_enabled = TRUE WHERE id = $1`, [userId]);
+
+    const rawCodes = generateBackupCodes(10);
+    await db.query(`DELETE FROM totp_backup_codes WHERE user_id = $1`, [userId]);
+    for (const code of rawCodes) {
+      const hash = await hashBackupCode(code);
+      await db.query(
+        `INSERT INTO totp_backup_codes (user_id, code_hash) VALUES ($1, $2)`,
+        [userId, hash]
+      );
+    }
 
     audit.log(userId, '2fa_enabled', req.ip, req.headers['user-agent']);
-    res.json({ message: '2FA enabled successfully' });
+    res.json({ message: '2FA enabled successfully', backup_codes: rawCodes });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function regenerateBackupCodes(req, res, next) {
+  try {
+    const { totp_code } = req.body;
+    const userId = req.user.userId;
+
+    const user = await db.query('SELECT totp_secret, totp_enabled FROM users WHERE id = $1', [userId]);
+    if (!user.rows[0]?.totp_enabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+    if (!verifyToken(user.rows[0].totp_secret, totp_code)) {
+      return res.status(401).json({ error: 'Invalid TOTP code' });
+    }
+
+    const rawCodes = generateBackupCodes(10);
+    await db.query(`DELETE FROM totp_backup_codes WHERE user_id = $1`, [userId]);
+    for (const code of rawCodes) {
+      const hash = await hashBackupCode(code);
+      await db.query(
+        `INSERT INTO totp_backup_codes (user_id, code_hash) VALUES ($1, $2)`,
+        [userId, hash]
+      );
+    }
+
+    audit.log(userId, '2fa_backup_codes_regenerated', req.ip, req.headers['user-agent']);
+    res.json({ backup_codes: rawCodes });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getBackupCodeCount(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const result = await db.query(
+      `SELECT COUNT(*) AS count FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`,
+      [userId]
+    );
+    res.json({ remaining: parseInt(result.rows[0].count, 10) });
   } catch (err) {
     next(err);
   }
@@ -517,10 +600,6 @@ async function setPIN(req, res, next) {
       `UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`,
       [pinHash, userId]
     );
-    await db.query(`UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`, [
-      pinHash,
-      userId,
-    ]);
 
     res.json({ message: 'PIN set successfully' });
   } catch (err) {
@@ -717,20 +796,29 @@ async function resetPassword(req, res, next) {
     const { user_id: userId } = found.rows[0];
     const passwordHash = await bcrypt.hash(password, 12);
 
-    await db.query('BEGIN');
-    await db.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, userId]);
-    await db.query(
-      `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
-      [userId]
-    );
-    await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
-    await db.query('COMMIT');
+    // Acquire a dedicated client so the three writes are atomic — if any step
+    // fails, ROLLBACK undoes all prior changes within this transaction.
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, userId]);
+      await client.query(
+        `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
+        [userId]
+      );
+      await client.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
+      await client.query('COMMIT');
+    } catch (clientErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw clientErr;
+    } finally {
+      client.release();
+    }
 
     audit.log(userId, 'password_change', req.ip, req.headers['user-agent']);
     audit.log(userId, 'password_reset_sessions_invalidated', req.ip, req.headers['user-agent']);
     res.json({ message: 'Password has been reset. You can now log in.' });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
     next(err);
   }
 }
@@ -827,6 +915,7 @@ async function changeEmail(req, res, next) {
     );
 
     await sendVerificationEmail(new_email, raw);
+    await sendEmailChangeRequestedNotice(user.email, new_email, req.ip, req.headers['user-agent']);
 
     audit.log(userId, 'email_change_requested', req.ip, req.headers['user-agent'], { new_email });
     res.json({ message: 'Verification email sent to new address. Check your inbox to confirm the change.' });
@@ -873,6 +962,34 @@ async function getActivity(req, res, next) {
       [req.user.userId]
     );
     res.json({ activity: result.rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function changePassword(req, res, next) {
+  try {
+    const { current_password, new_password } = req.body;
+    const userId = req.user.userId;
+
+    const { rows } = await db.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+    if (!rows[0] || !(await bcrypt.compare(current_password, rows[0].password_hash))) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    const newHash = await bcrypt.hash(new_password, 12);
+    await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, userId]);
+
+    // Invalidate all other sessions
+    const currentHash = req.headers.authorization
+      ? require('crypto').createHash('sha256').update(req.headers.authorization.replace('Bearer ', '')).digest('hex')
+      : null;
+    if (currentHash) {
+      await invalidateOtherSessions(userId, currentHash).catch(() => {});
+    }
+
+    audit.log(userId, 'password_change', req.ip, req.headers['user-agent']);
+    res.json({ message: 'Password changed successfully' });
   } catch (err) {
     next(err);
   }
@@ -929,7 +1046,6 @@ async function uploadAvatar(req, res, next) {
   }
 }
 
-module.exports = { register, login, verifyEmail, getMe, setPIN, verifyPIN };
 module.exports = {
   register,
   login,
@@ -950,5 +1066,8 @@ module.exports = {
   disable2FA,
   forgotPassword,
   resetPassword,
+  regenerateBackupCodes,
+  getBackupCodeCount,
+  changePassword,
   validateResetToken,
 };

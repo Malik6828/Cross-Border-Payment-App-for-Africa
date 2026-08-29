@@ -2,9 +2,13 @@ const router = require('express').Router();
 const { query, body, validationResult } = require('express-validator');
 const authMiddleware = require('../middleware/auth');
 const db = require('../db');
-const { getOrderbook, executeSwap, getTradeHistory } = require('../services/dex');
+const cache = require('../utils/cache');
+const { parseAssetParam, getOrderbook, executeSwap, getTradeHistory } = require('../services/dex');
 
-const VALID_ASSETS = /^[A-Z0-9]{1,12}$/;
+const ORDERBOOK_TTL = 5; // seconds — one Stellar ledger close
+
+// Accepts "XLM" or "CODE" or "CODE:GISSUER..."
+const ASSET_PARAM_RE = /^[A-Z0-9]{1,12}(:[A-Z2-7]{56})?$/i;
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -18,15 +22,44 @@ const validate = (req, res, next) => {
  */
 router.get('/orderbook',
   [
-    query('selling').matches(VALID_ASSETS).withMessage('Invalid selling asset'),
-    query('buying').matches(VALID_ASSETS).withMessage('Invalid buying asset'),
+    query('selling')
+      .matches(ASSET_PARAM_RE)
+      .withMessage('selling must be XLM, a CODE, or CODE:GISSUER'),
+    query('buying')
+      .matches(ASSET_PARAM_RE)
+      .withMessage('buying must be XLM, a CODE, or CODE:GISSUER'),
+    query('limit')
+      .optional()
+      .isInt({ min: 1, max: 200 })
+      .withMessage('limit must be 1–200'),
+    query('amount')
+      .optional()
+      .isFloat({ gt: 0 })
+      .withMessage('amount must be a positive number'),
   ],
   validate,
   async (req, res, next) => {
     try {
-      const data = await getOrderbook(req.query.selling, req.query.buying);
+      // Validate asset params early to return a clean 400 before hitting Horizon
+      try {
+        parseAssetParam(req.query.selling);
+        parseAssetParam(req.query.buying);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+
+      const limit  = req.query.limit  ? parseInt(req.query.limit, 10) : 10;
+      const amount = req.query.amount ? parseFloat(req.query.amount)  : null;
+      const cacheKey = `orderbook:${req.query.selling}:${req.query.buying}:${limit}:${amount ?? ''}`;
+
+      const cached = await cache.get(cacheKey);
+      if (cached) return res.json(cached);
+
+      const data = await getOrderbook(req.query.selling, req.query.buying, limit, amount);
+      await cache.set(cacheKey, data, ORDERBOOK_TTL);
       res.json(data);
     } catch (err) {
+      if (err.status === 400) return res.status(400).json({ error: err.message });
       next(err);
     }
   }
@@ -39,9 +72,9 @@ router.get('/orderbook',
 router.post('/swap',
   authMiddleware,
   [
-    body('sell_asset').matches(VALID_ASSETS).withMessage('Invalid sell_asset'),
+    body('sell_asset').matches(ASSET_PARAM_RE).withMessage('Invalid sell_asset'),
     body('sell_amount').isFloat({ gt: 0 }).withMessage('sell_amount must be > 0'),
-    body('buy_asset').matches(VALID_ASSETS).withMessage('Invalid buy_asset'),
+    body('buy_asset').matches(ASSET_PARAM_RE).withMessage('Invalid buy_asset'),
     body('slippage_pct').optional().isFloat({ min: 0, max: 50 }).withMessage('slippage_pct must be 0–50'),
   ],
   validate,

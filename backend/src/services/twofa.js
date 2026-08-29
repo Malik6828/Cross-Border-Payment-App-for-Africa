@@ -1,6 +1,7 @@
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 
 async function generateSecret(email) {
   const secret = speakeasy.generateSecret({
@@ -37,9 +38,19 @@ function useBackupCode(codes, code) {
   return codes;
 }
 
+async function hashBackupCode(code) {
+  return bcrypt.hash(code, 10);
+}
+
+async function verifyBackupCode(code, hash) {
+  return bcrypt.compare(code, hash);
+}
+
 module.exports = {
   generateSecret,
   verifyToken,
   generateBackupCodes,
-  useBackupCode
+  useBackupCode,
+  hashBackupCode,
+  verifyBackupCode,
 };

@@ -46,26 +46,6 @@
       "/node_modules/(?!(axios)/)"
     ],
     "moduleNameMapper": {
-      "^@sentry/react$": "<rootDir>/src/__mocks__/@sentry/react.js"
-    }
-  },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
-  },
-  "jest": {
-    "transformIgnorePatterns": [
-      "/node_modules/(?!(axios)/)"
-    ],
-    "moduleNameMapper": {
       "^@sentry/react$": "<rootDir>/src/__mocks__/@sentry/react.js",
       "^@ledgerhq/hw-transport-webusb$": "<rootDir>/src/__mocks__/@ledgerhq/hw-transport-webusb.js",
       "^@ledgerhq/hw-app-str$": "<rootDir>/src/__mocks__/@ledgerhq/hw-app-str.js"

@@ -1,19 +1,22 @@
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 const Sentry = require('@sentry/node');
 
 const requestId = require('./middleware/requestId');
 const metricsMiddleware = require('./middleware/metricsMiddleware');
 const { registry } = require('./utils/metrics');
+const rateLimiters = require('./middleware/rateLimiter');
+const { getHealth: getLedgerHealth } = require('./services/ledgerListener');
 
 const authRoutes = require('./routes/auth');
 const walletRoutes = require('./routes/wallet');
 const paymentRoutes = require('./routes/payments');
 const paymentRequestRoutes = require('./routes/paymentRequests');
 const scheduledPaymentRoutes = require('./routes/scheduledPayments');
+const savingsRoutes = require('./routes/savings');
 const anchorRoutes = require('./routes/anchor');
 const kycRoutes = require('./routes/kyc');
 const adminRoutes = require('./routes/admin');
@@ -36,6 +39,7 @@ const pricesRoutes = require('./routes/prices');
 const channelsRoutes = require('./routes/channels');
 const contractsRoutes = require('./routes/contracts');
 const ledgerRoutes = require('./routes/ledger');
+const contactsRoutes = require('./routes/contacts');
 const ipAllowlist = require('./middleware/ipAllowlist');
 const geoRestriction = require('./middleware/geoRestriction');
 
@@ -43,7 +47,7 @@ const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
 
 const logger = require('./utils/logger');
-const { runHealthChecks } = require('./services/health');
+const { runHealthChecks, runDeepHealthChecks } = require('./services/health');
 
 const app = express();
 
@@ -59,42 +63,55 @@ app.use((req, res, next) => {
 });
 app.use(metricsMiddleware);
 app.use(cookieParser());
-app.use(helmet({
+app.use((req, res, next) => {
+  res.locals.cspNonce = crypto.randomBytes(16).toString('base64');
+  next();
+});
+app.use((req, res, next) => helmet({
   contentSecurityPolicy: {
     directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'"],
+      defaultSrc: ["'none'"],
+      scriptSrc: ["'self'", `'nonce-${res.locals.cspNonce}'`],
+      connectSrc: ["'self'", 'https://horizon.stellar.org', 'wss://horizon.stellar.org'],
       imgSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'", 'https://horizon-testnet.stellar.org', 'https://horizon.stellar.org'],
-      fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      frameSrc: ["'none'"],
+      frameAncestors: ["'none'"],
     },
   },
-}));
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true,
+  },
+  frameguard: { action: 'deny' },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  permissionsPolicy: {
+    camera: [],
+    microphone: [],
+    geolocation: [],
+    payment: [],
+  },
+})(req, res, next));
 app.use(cors({ origin: process.env.FRONTEND_URL, credentials: true, maxAge: 86400 }));
 app.use(express.json());
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: { error: 'Too many requests, please try again later.' },
-});
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  message: { error: 'Too many auth attempts, please try again later.' },
+app.use((req, res, next) => {
+  res.removeHeader('Server');
+  next();
 });
 
-app.use('/api', limiter);
-app.use('/api/auth', authLimiter);
+// Granular per-endpoint rate limiting (Redis-backed when REDIS_URL is set)
+app.use('/api/auth/login', rateLimiters.authLimiter);
+app.use('/api/auth/register', rateLimiters.authLimiter);
+app.use('/api/payments/send', rateLimiters.paymentLimiter);
+app.use('/api/admin', rateLimiters.adminLimiter);
+app.use('/api', rateLimiters.readLimiter);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/wallet', walletRoutes);
 app.use('/api/payments', geoRestriction, paymentRoutes);
 app.use('/api/payment-requests', geoRestriction, paymentRequestRoutes);
 app.use('/api/scheduled-payments', geoRestriction, scheduledPaymentRoutes);
+app.use('/api/savings', geoRestriction, savingsRoutes);
 app.use('/api/anchor', anchorRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/dex', dexRoutes);
@@ -109,6 +126,7 @@ app.use('/api/prices', pricesRoutes);
 app.use('/api/channels', channelsRoutes);
 app.use('/api/contracts', contractsRoutes);
 app.use('/api/ledger', ledgerRoutes);
+app.use('/api/contacts', contactsRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/tools', toolsRoutes);
 app.use('/api/dev', toolsRoutes); // legacy alias
@@ -176,6 +194,10 @@ const swaggerOptions = {
 
 const specs = swaggerJsdoc(swaggerOptions);
 
+app.use('/api/docs', (req, res, next) => {
+  res.removeHeader('Content-Security-Policy');
+  next();
+});
 app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(specs));
 
 /**
@@ -215,6 +237,25 @@ app.get('/health', async (req, res) => {
   } catch {
     res.status(503).json({ status: 'degraded' });
   }
+});
+
+const deepHealthLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: 'Too many health check requests.' },
+});
+
+app.get('/health/deep', deepHealthLimiter, async (req, res) => {
+  try {
+    const health = await runDeepHealthChecks();
+    const httpStatus = health.status === 'unhealthy' ? 503 : 200;
+    res.status(httpStatus).json(health);
+  } catch {
+    res.status(503).json({ status: 'unhealthy' });
+  }
+});
+app.get('/api/health/ledger-listener', (req, res) => {
+  res.json(getLedgerHealth());
 });
 
 app.get('/metrics', async (req, res) => {

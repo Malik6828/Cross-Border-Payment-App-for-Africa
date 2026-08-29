@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Plus, Webhook, Copy, CheckCheck, Eye, EyeOff, RefreshCw, ChevronDown, ChevronUp, Clock } from 'lucide-react';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
@@ -120,6 +120,7 @@ export default function Webhooks() {
   const [form, setForm] = useState({ url: '', events: [] });
   const [submitting, setSubmitting] = useState(false);
   const [revealedSecret, setRevealedSecret] = useState(null);
+  const revealTimerRef = useRef(null);
   const [copied, setCopied] = useState(null);
 
   useEffect(() => {
@@ -127,6 +128,7 @@ export default function Webhooks() {
       .then(r => setWebhooks(r.data.webhooks))
       .catch(() => toast.error('Failed to load webhooks'))
       .finally(() => setLoading(false));
+    return () => clearTimeout(revealTimerRef.current);
   }, []);
 
   const toggleEvent = (event) => {
@@ -257,7 +259,16 @@ export default function Webhooks() {
                   <span className="text-xs font-mono text-yellow-400 flex-1 truncate">
                     {revealedSecret === wh.id ? wh.secret : '••••••••••••••••'}
                   </span>
-                  <button onClick={() => setRevealedSecret(revealedSecret === wh.id ? null : wh.id)} className="text-gray-500 hover:text-gray-300 shrink-0">
+                  <button onClick={() => {
+                    if (revealedSecret === wh.id) {
+                      clearTimeout(revealTimerRef.current);
+                      setRevealedSecret(null);
+                    } else {
+                      setRevealedSecret(wh.id);
+                      clearTimeout(revealTimerRef.current);
+                      revealTimerRef.current = setTimeout(() => setRevealedSecret(null), 30000);
+                    }
+                  }} className="text-gray-500 hover:text-gray-300 shrink-0">
                     {revealedSecret === wh.id ? <EyeOff size={14} /> : <Eye size={14} />}
                   </button>
                   <button onClick={() => copySecret(wh.id, wh.secret)} className="text-gray-500 hover:text-gray-300 shrink-0">

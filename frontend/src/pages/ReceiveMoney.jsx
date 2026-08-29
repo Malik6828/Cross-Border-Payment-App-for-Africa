@@ -84,14 +84,22 @@ export default function ReceiveMoney() {
     return `web+stellar:pay?${params.toString()}`;
   })();
 
-  const copyAddress = (addr) => {
-    navigator.clipboard.writeText(addr);
-    toast.success(t('receive.address_copied'));
+  const copyAddress = async (addr) => {
+    try {
+      await navigator.clipboard.writeText(addr);
+      toast.success(t('receive.address_copied'));
+    } catch {
+      toast.error('Failed to copy address');
+    }
   };
 
-  const copyUri = () => {
-    navigator.clipboard.writeText(paymentUri);
-    toast.success('Payment link copied');
+  const copyUri = async () => {
+    try {
+      await navigator.clipboard.writeText(paymentUri);
+      toast.success('Payment link copied');
+    } catch {
+      toast.error('Failed to copy payment link');
+    }
   };
 
   const handleDownloadPng = useCallback(() => {

@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { ArrowUpDown, AlertTriangle, CheckCircle2, Settings } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
 
@@ -17,6 +18,7 @@ function getSavedSlippage() {
 }
 
 export default function Swap() {
+  const { t } = useTranslation();
   const [sellAsset, setSellAsset] = useState('XLM');
   const [buyAsset, setBuyAsset] = useState('USDC');
   const [sellAmount, setSellAmount] = useState('');
@@ -36,7 +38,7 @@ export default function Swap() {
 
   const applySlippage = (value) => {
     const v = parseFloat(value);
-    if (!isNaN(v) && v > 0) {
+    if (!isNaN(v) && v > 0 && v <= 50) {
       setSlippage(v);
       localStorage.setItem(SLIPPAGE_STORAGE_KEY, String(v));
     }
@@ -187,14 +189,14 @@ export default function Swap() {
 
   return (
     <div className="px-4 py-6 max-w-lg mx-auto space-y-5">
-      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Swap</h2>
+      <h2 className="text-2xl font-bold text-gray-900 dark:text-white">{t('swap.title')}</h2>
 
       {/* Rate display with slippage settings */}
       <div className="bg-primary-500/10 border border-primary-500/20 rounded-xl px-4 py-2.5 flex items-center justify-between text-sm">
         <span className="text-gray-500 dark:text-gray-400">
           {quote?.midPrice
             ? `1 ${sellAsset} ≈ ${(1 / quote.midPrice).toFixed(6)} ${buyAsset}`
-            : 'DEX rate'}
+            : t('swap.dex_rate')}
         </span>
         <div className="relative" ref={slippagePopoverRef}>
           <button
@@ -210,7 +212,7 @@ export default function Swap() {
           {showSlippagePopover && (
             <div className="absolute right-0 top-8 z-20 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl p-4 w-56 shadow-xl space-y-3">
               <p className="text-xs font-semibold text-gray-600 dark:text-gray-400 uppercase tracking-wide">
-                Slippage Tolerance
+                {t('swap.slippage_tolerance')}
               </p>
               <div className="flex gap-2">
                 {SLIPPAGE_PRESETS.map((p) => (
@@ -229,7 +231,7 @@ export default function Swap() {
                 ))}
               </div>
               <div>
-                <label className="text-xs text-gray-500 block mb-1">Custom</label>
+                <label className="text-xs text-gray-500 block mb-1">{t('swap.custom')}</label>
                 <div className="flex items-center gap-1">
                   <input
                     type="number"
@@ -249,7 +251,7 @@ export default function Swap() {
               </div>
               {slippage > 5 && (
                 <p className="text-xs text-yellow-500">
-                  High slippage tolerance — your trade may result in an unfavorable price.
+                  {t('swap.high_slippage_warning')}
                 </p>
               )}
             </div>
@@ -260,7 +262,7 @@ export default function Swap() {
       <form onSubmit={handleSwap} className="space-y-3">
         {/* Sell */}
         <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl p-4 space-y-2">
-          <label className="text-xs text-gray-500 uppercase tracking-wide">You sell</label>
+          <label className="text-xs text-gray-500 uppercase tracking-wide">{t('swap.you_sell')}</label>
           <div className="flex items-center gap-3">
             <input
               type="number"
@@ -290,7 +292,7 @@ export default function Swap() {
 
         {/* Buy */}
         <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl p-4 space-y-2">
-          <label className="text-xs text-gray-500 uppercase tracking-wide">You receive (est.)</label>
+          <label className="text-xs text-gray-500 uppercase tracking-wide">{t('swap.you_receive_est')}</label>
           <div className="flex items-center gap-3">
             <span className="flex-1 text-2xl font-bold text-gray-400 dark:text-gray-600">
               {quoteLoading ? '…' : quote?.estimatedReceived ?? '0.00'}
@@ -299,7 +301,7 @@ export default function Swap() {
           </div>
           {minReceived && (
             <p className="text-xs text-gray-500">
-              Minimum received: {minReceived} {buyAsset} ({slippage}% slippage)
+              {t('swap.minimum_received', { amount: minReceived, asset: buyAsset, slippage })}
             </p>
           )}
         </div>
@@ -308,8 +310,7 @@ export default function Swap() {
           <div className="flex items-start gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 text-sm text-yellow-500">
             <AlertTriangle size={16} className="shrink-0 mt-0.5" />
             <span>
-              High price impact ({quote.priceImpactPct.toFixed(1)}%). Your order is large relative to
-              available liquidity — you may receive significantly less than the quoted amount.
+              {t('swap.high_price_impact', { pct: quote.priceImpactPct.toFixed(1) })}
             </span>
           </div>
         )}
@@ -317,11 +318,9 @@ export default function Swap() {
         {/* Confirm step */}
         {confirmOpen && (
           <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl px-4 py-3 text-sm text-yellow-400">
-            <p className="font-semibold mb-1">Confirm swap</p>
-            <p>Sell <span className="font-semibold">{sellAmount} {sellAsset}</span> for approximately{' '}
-              <span className="font-semibold">{quote?.estimatedReceived} {buyAsset}</span>?
-            </p>
-            <p className="text-xs text-gray-400 mt-1">Price is locked — auto-refresh paused.</p>
+            <p className="font-semibold mb-1">{t('swap.confirm_swap')}</p>
+            <p>{t('swap.confirm_swap_detail', { sellAmount, sellAsset, estimatedReceived: quote?.estimatedReceived, buyAsset })}</p>
+            <p className="text-xs text-gray-400 mt-1">{t('swap.price_locked')}</p>
           </div>
         )}
 
@@ -330,7 +329,7 @@ export default function Swap() {
           disabled={submitting || !sellAmount || parseFloat(sellAmount) <= 0}
           className="w-full bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white font-semibold py-3.5 rounded-2xl transition-colors"
         >
-          {submitting ? 'Swapping…' : confirmOpen ? 'Confirm Swap' : `Swap ${sellAsset} → ${buyAsset}`}
+          {submitting ? t('swap.swapping') : confirmOpen ? t('swap.confirm_swap_button') : t('swap.swap_button', { sellAsset, buyAsset })}
         </button>
 
         {confirmOpen && (
@@ -339,7 +338,7 @@ export default function Swap() {
             onClick={() => setConfirmOpen(false)}
             className="w-full text-gray-400 hover:text-white text-sm py-2 transition-colors"
           >
-            Cancel
+            {t('common.cancel')}
           </button>
         )}
       </form>
@@ -348,13 +347,13 @@ export default function Swap() {
       {result && (
         <div className="bg-green-500/10 border border-green-500/30 rounded-2xl p-4 space-y-1">
           <div className="flex items-center gap-2 text-green-400 font-semibold text-sm mb-2">
-            <CheckCircle2 size={16} /> Swap complete
+            <CheckCircle2 size={16} /> {t('swap.swap_complete')}
           </div>
           <p className="text-sm text-gray-700 dark:text-gray-300">
-            Sold <span className="font-semibold">{result.soldAmount} {result.soldAsset}</span>
+            {t('swap.sold', { amount: result.soldAmount, asset: result.soldAsset })}
           </p>
           <p className="text-sm text-gray-700 dark:text-gray-300">
-            Est. received <span className="font-semibold">{result.estimatedReceived} {result.buyAsset}</span>
+            {t('swap.est_received', { amount: result.estimatedReceived, asset: result.buyAsset })}
           </p>
           <a
             href={`https://stellar.expert/explorer/testnet/tx/${result.transactionHash}`}

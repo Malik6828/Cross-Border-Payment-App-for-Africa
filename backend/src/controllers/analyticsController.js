@@ -12,8 +12,9 @@
  */
 const db = require('../db');
 const { refreshDailyAggregates, getLastRefreshedAt } = require('../services/analyticsRefresh');
+const { validateDateRange } = require('../utils/historyQuery');
 
-exports.summary = async (req, res) => {
+exports.summary = async (req, res, next) => {
   try {
     const walletResult = await db.query(
       'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
@@ -34,6 +35,11 @@ exports.summary = async (req, res) => {
     }
     if (from > to) {
       return res.status(400).json({ error: 'from must be before or equal to to' });
+    }
+
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const walletCondition = '(sender_wallet = $1 OR recipient_wallet = $1)';
@@ -86,11 +92,11 @@ exports.summary = async (req, res) => {
       refreshed_at: new Date().toISOString(), // live query — always current
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-exports.volume = async (req, res) => {
+exports.volume = async (req, res, next) => {
   try {
     const now = new Date();
     const defaultFrom = new Date(now);
@@ -104,6 +110,11 @@ exports.volume = async (req, res) => {
     }
     if (from > to) {
       return res.status(400).json({ error: 'from must be before or equal to to' });
+    }
+
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const rangeDays = Math.ceil((to - from) / (1000 * 60 * 60 * 24));
@@ -181,11 +192,11 @@ exports.volume = async (req, res) => {
       refreshed_at: refreshedAt,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
-exports.fees = async (req, res) => {
+exports.fees = async (req, res, next) => {
   try {
     const now = new Date();
     const defaultFrom = new Date(now);
@@ -199,6 +210,11 @@ exports.fees = async (req, res) => {
     }
     if (from > to) {
       return res.status(400).json({ error: 'from must be before or equal to to' });
+    }
+
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const [totals, byAsset] = await Promise.all([
@@ -230,7 +246,7 @@ exports.fees = async (req, res) => {
       refreshed_at: new Date().toISOString(), // live query — always current
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 

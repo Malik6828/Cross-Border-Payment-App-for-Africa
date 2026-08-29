@@ -238,8 +238,6 @@ export default function Dashboard() {
           setTxError(false);
         } else {
           setTxError(true);
-          setTransactionsError(false);
-        } else {
           setTransactionsError(true);
         }
         if (!cachedWallets?.data) {
@@ -271,11 +269,15 @@ export default function Dashboard() {
     }
   }, [loadDashboard, isOnline]);
 
-  const copyAddress = () => {
+  const copyAddress = async () => {
     if (!wallet?.public_key) return;
-    navigator.clipboard.writeText(wallet.public_key);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(wallet.public_key);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Failed to copy address');
+    }
   };
 
   const fundWallet = async () => {
@@ -988,7 +990,29 @@ export default function Dashboard() {
           </button>
         </div>
 
-        {transactions.length === 0 ? (
+        {loading && transactions.length === 0 ? (
+          <div className="space-y-2" data-testid="transactions-skeleton" aria-hidden="true">
+            {[0, 1, 2].map((i) => (
+              <TransactionRowSkeleton key={i} />
+            ))}
+          </div>
+        ) : (txError || transactionsError) && transactions.length === 0 ? (
+          <div
+            role="alert"
+            className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-4 text-red-300 shadow-sm"
+          >
+            <p className="text-sm font-medium">Could not load recent activity.</p>
+            <button
+              type="button"
+              onClick={() => loadDashboard(true)}
+              disabled={refreshing}
+              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-red-500/20 px-3 py-2 text-sm font-semibold text-red-100 hover:bg-red-500/30 disabled:opacity-50"
+            >
+              <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
+              Retry
+            </button>
+          </div>
+        ) : transactions.length === 0 ? (
           <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-8 text-center shadow-sm">
             <div className="w-16 h-16 bg-primary-500/10 rounded-full flex items-center justify-center mx-auto mb-4">
               <Send size={28} className="text-primary-500" />
@@ -1016,45 +1040,6 @@ export default function Dashboard() {
                 Add Funds
               </button>
             </div>
-        {loading ? (
-          <div className="space-y-2" aria-busy="true" aria-label="Loading transactions">
-            <TransactionRowSkeleton />
-            <TransactionRowSkeleton />
-            <TransactionRowSkeleton />
-          </div>
-        ) : txError ? (
-          <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-6 text-center text-sm shadow-sm">
-            <p className="text-gray-500 mb-3">Failed to load transactions.</p>
-            <button
-              onClick={() => loadDashboard(false)}
-              className="text-primary-500 font-medium hover:underline"
-            >
-              {t('common.retry')}
-        {loading && transactions.length === 0 ? (
-          <div className="space-y-2" data-testid="transactions-skeleton" aria-hidden="true">
-            {[0, 1, 2].map((i) => (
-              <TransactionRowSkeleton key={i} />
-            ))}
-          </div>
-        ) : transactionsError && transactions.length === 0 ? (
-          <div
-            role="alert"
-            className="bg-red-500/10 border border-red-500/30 rounded-xl px-4 py-4 text-red-300 shadow-sm"
-          >
-            <p className="text-sm font-medium">Could not load recent activity.</p>
-            <button
-              type="button"
-              onClick={() => loadDashboard(true)}
-              disabled={refreshing}
-              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-red-500/20 px-3 py-2 text-sm font-semibold text-red-100 hover:bg-red-500/30 disabled:opacity-50"
-            >
-              <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} />
-              Retry
-            </button>
-          </div>
-        ) : transactions.length === 0 ? (
-          <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-6 text-center text-gray-500 text-sm shadow-sm">
-            {t('dashboard.no_transactions')}
           </div>
         ) : (
           <div className="space-y-2">
@@ -1112,6 +1097,5 @@ export default function Dashboard() {
           </div>
         )}
       </div>
-    </div>
   );
 }

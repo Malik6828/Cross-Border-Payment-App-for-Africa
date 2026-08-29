@@ -4,10 +4,13 @@ const logger = require('../utils/logger');
 const { withRetry, retryWithBackoff } = require('../utils/retry');
 const { withTimeout } = require('../utils/withTimeout');
 const { enqueue } = require('../utils/txQueue');
+const { checkMemoRequired } = require('./memoRequired');
 const {
   AccountResponseSchema,
   TransactionSubmitResponseSchema,
   TransactionPageSchema,
+  TransactionRecordSchema,
+  OperationPageSchema,
   PathPageSchema,
   validateHorizonResponse,
 } = require('../utils/horizonSchemas');
@@ -67,7 +70,6 @@ function isNetworkError(err) {
  * Execute fn(server) with automatic failover to the fallback node on network errors only.
  * Records Horizon call duration via Prometheus.
  */
-async function withFallback(fn, logger = require('../utils/logger')) {
 async function withFallback(fn, operation = 'unknown') {
   const end = horizonRequestDuration.startTimer({ operation });
   try {
@@ -159,18 +161,31 @@ async function getBalance(publicKey) {
 
     return {
       account_exists: true,
+      num_subentries: numSubentries,
       balances: account.balances.map(b => {
         if (b.asset_type === 'native') {
           const total = parseFloat(b.balance);
           const available = Math.max(0, total - minBalance);
           return {
+            asset_type: 'native',
+            asset_code: 'XLM',
+            asset_issuer: null,
             asset: 'XLM',
             balance: b.balance,
             available_balance: available.toFixed(7),
             min_balance: minBalance.toFixed(7),
+            minimum_balance_reserve: minBalance.toFixed(7),
           };
         }
-        return { asset: b.asset_code, balance: b.balance };
+        return {
+          asset_type: b.asset_type,
+          asset_code: b.asset_code,
+          asset_issuer: b.asset_issuer || null,
+          asset: b.asset_code,
+          balance: b.balance,
+          limit: b.limit || null,
+          is_authorized: b.is_authorized ?? true,
+        };
       }),
     };
   } catch (e) {
@@ -441,6 +456,15 @@ async function _sendPaymentOnce({
   // Guard against testnet/mainnet mixup
   validateNetworkPassphrase(networkPassphrase);
 
+  // Enforce memo requirement for known exchange destinations
+  const memoRequired = await checkMemoRequired(recipientPublicKey);
+  if (memoRequired && !memo) {
+    const err = new Error('The destination account requires a transaction memo. Please add a memo and retry.');
+    err.status = 400;
+    err.code = 'MEMO_REQUIRED';
+    throw err;
+  }
+
   const assetObj = resolveAsset(asset);
 
   if (asset !== 'XLM') {
@@ -669,6 +693,62 @@ async function getTransactions(publicKey, limit = 20) {
   } catch (e) {
     return [];
   }
+}
+
+/**
+ * Verify that a given transaction hash corresponds to a successful Stellar
+ * transaction that pays at least `minAmount` of `asset` to `destination`.
+ * Used to confirm claimed payment requests before trusting a caller-supplied
+ * txHash (issue #878).
+ *
+ * @returns {Promise<{verified: boolean, reason?: string}>}
+ */
+async function verifyIncomingPayment({ txHash, destination, asset, minAmount }) {
+  if (typeof txHash !== 'string' || !/^[0-9a-f]{64}$/i.test(txHash)) {
+    return { verified: false, reason: 'txHash must be a 64-character hex transaction hash' };
+  }
+  const normalizedHash = txHash.toLowerCase();
+
+  let txRecord;
+  try {
+    const raw = await withFallback(s => s.transactions().transaction(normalizedHash).call());
+    txRecord = validateHorizonResponse(TransactionRecordSchema, raw, 'transactions.transaction');
+  } catch (e) {
+    if (e.response?.status === 404) {
+      return { verified: false, reason: 'Transaction not found' };
+    }
+    throw e;
+  }
+
+  if (!txRecord.successful) {
+    return { verified: false, reason: 'Transaction was not successful' };
+  }
+
+  const raw = await withFallback(s => s.operations().forTransaction(normalizedHash).call());
+  const opsPage = validateHorizonResponse(OperationPageSchema, raw, 'operations.forTransaction');
+
+  const assetObj = resolveAsset(asset);
+  const minAmountNum = parseFloat(minAmount);
+
+  const matched = opsPage.records.some(op => {
+    if (!['payment', 'path_payment_strict_receive', 'path_payment_strict_send'].includes(op.type)) {
+      return false;
+    }
+    if (op.to !== destination) return false;
+
+    const assetMatches = assetObj.isNative()
+      ? op.asset_type === 'native'
+      : op.asset_code === assetObj.getCode() && op.asset_issuer === assetObj.getIssuer();
+    if (!assetMatches) return false;
+
+    return parseFloat(op.amount) >= minAmountNum;
+  });
+
+  if (!matched) {
+    return { verified: false, reason: `No payment of at least ${minAmount} ${asset} to ${destination} found on this transaction` };
+  }
+
+  return { verified: true };
 }
 
 // Issue AFRI asset to a recipient
@@ -1001,13 +1081,10 @@ async function addAccountSigner({ ownerPublicKey, encryptedSecretKey, signerPubl
     .setTimeout(30)
     .build();
 
-  transaction.sign(distributionKeypair);
-
-  const result = await server.submitTransaction(transaction);
-  return {
-    transactionHash: result.hash,
-    ledger: result.ledger
-  };
+  tx.sign(ownerKeypair);
+  const rawResult = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addSigner)' });
+  const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(addSigner)');
+  return { transactionHash: result.hash };
 }
 
 // Get AFRI asset information
@@ -1064,13 +1141,6 @@ async function getStellarStats() {
     logger.error('Error fetching Stellar stats', { error: err.message });
     throw err;
   }
-}
-
-
-  tx.sign(ownerKeypair);
-  const rawResult = await withRetry(() => server.submitTransaction(tx), { label: 'submitTransaction(addSigner)' });
-  const result = validateHorizonResponse(TransactionSubmitResponseSchema, rawResult, 'submitTransaction(addSigner)');
-  return { transactionHash: result.hash };
 }
 
 /**
@@ -1431,6 +1501,7 @@ module.exports = {
   sendPayment,
   sendBatchPayment,
   getTransactions,
+  verifyIncomingPayment,
   encryptPrivateKey,
   decryptPrivateKey,
   fetchFee,

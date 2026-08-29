@@ -2,13 +2,14 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
-import { Eye, EyeOff, ArrowLeft, ShieldCheck } from 'lucide-react';
+import { Eye, EyeOff, ArrowLeft, ShieldCheck, MailCheck } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import api from '../utils/api';
 
 export default function Login() {
-  const { login } = useAuth();
+  const { login, updateUser } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const { t } = useTranslation();
   const [searchParams] = useSearchParams();
   const [form, setForm] = useState({ email: '', password: '' });
@@ -115,7 +116,16 @@ export default function Login() {
         // Manually set token + user via the same path login() uses
         const { tokenStore } = await import('../context/AuthContext');
         tokenStore.set(res.data.token);
-        // Reload user via /auth/me so AuthContext is populated
+        // Populate AuthContext user from the login response (same as login() does)
+        updateUser(res.data.user);
+        // Set Sentry user context for error tracking
+        const { default: Sentry } = await import('@sentry/react');
+        Sentry.setUser({
+          id: res.data.user.id,
+          wallet: res.data.user.wallet_address
+            ? `${res.data.user.wallet_address.slice(0, 4)}...${res.data.user.wallet_address.slice(-4)}`
+            : undefined,
+        });
         navigate('/dashboard');
       } catch (err) {
         toast.error(err.response?.data?.error || t('login.totp_error', 'Invalid code. Try again.'));
@@ -189,6 +199,18 @@ export default function Login() {
           <>
             <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-1">{t('login.title')}</h2>
             <p className="text-gray-600 dark:text-gray-400 mb-8">{t('login.subtitle')}</p>
+
+            {emailVerificationRequired && (
+              <div
+                role="alert"
+                className="flex items-start gap-3 bg-blue-50 dark:bg-blue-500/10 border border-blue-200 dark:border-blue-500/30 rounded-xl px-4 py-3 mb-6"
+              >
+                <MailCheck size={18} className="text-blue-500 flex-shrink-0 mt-0.5" />
+                <p className="text-sm text-blue-700 dark:text-blue-300">
+                  {t('register.verify_email_notice', 'Account created! Please check your email and verify your address before logging in.')}
+                </p>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>

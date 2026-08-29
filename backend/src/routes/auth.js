@@ -21,6 +21,9 @@ const {
   disable2FA,
   forgotPassword,
   resetPassword,
+  regenerateBackupCodes,
+  getBackupCodeCount,
+  changePassword,
   validateResetToken,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
@@ -156,6 +159,16 @@ router.post(
   disable2FA
 );
 
+router.post(
+  '/2fa/backup-codes/regenerate',
+  authMiddleware,
+  [body('totp_code').matches(/^\d{6}$/).withMessage('TOTP code must be 6 digits')],
+  validate,
+  regenerateBackupCodes
+);
+
+router.get('/2fa/backup-codes/count', authMiddleware, getBackupCodeCount);
+
 // Avatar upload — 5 MB limit, memory storage (magic bytes checked in controller)
 const avatarUpload = multer({
   storage: multer.memoryStorage(),
@@ -165,6 +178,18 @@ const avatarUpload = multer({
     else cb(new Error('Only JPEG, PNG, and WebP files are allowed'));
   },
 });
+
+// Change password — invalidates all other active sessions
+router.patch(
+  '/password',
+  authMiddleware,
+  [
+    body('current_password').notEmpty().withMessage('Current password is required'),
+    body('new_password').isLength({ min: 8 }).withMessage('New password must be at least 8 characters'),
+  ],
+  validate,
+  changePassword
+);
 
 router.post(
   '/avatar',

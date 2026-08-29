@@ -1,5 +1,5 @@
 import React from 'react';
-import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { Outlet, NavLink, useNavigate, useLocation, useMatch } from 'react-router-dom';
 import { LayoutDashboard, Send, Download, Clock, Upload, User, LogOut, Sun, Moon, Bell, BellOff, AlertTriangle, ArrowUpDown, PiggyBank, Lock } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -19,6 +19,41 @@ const navItems = [
 ];
 
 const isTestnet = process.env.REACT_APP_STELLAR_NETWORK !== 'mainnet';
+
+function NavItem({ to, icon: Icon, label, user }) {
+  const match = useMatch(to);
+  const isActive = !!match;
+
+  return (
+    <NavLink
+      to={to}
+      aria-current={isActive ? 'page' : undefined}
+      className={({ isActive: innerActive }) =>
+        `flex flex-col items-center gap-0.5 px-3 py-1 rounded-lg transition-colors text-xs ${
+          innerActive
+            ? 'text-primary-500 font-semibold'
+            : 'text-gray-500 hover:text-gray-300'
+        }`
+      }
+    >
+      {({ isActive: innerActive }) => (
+        <>
+          {to === '/profile' && user ? (
+            <div className={`w-5 h-5 rounded-full overflow-hidden flex items-center justify-center text-[10px] font-bold ${innerActive ? 'ring-2 ring-primary-500' : ''} ${user.avatar_url ? '' : 'bg-primary-500 text-white'}`}>
+              {user.avatar_url
+                ? <img src={user.avatar_url} alt="avatar" className="w-full h-full object-cover" />
+                : user.full_name?.[0]?.toUpperCase()
+              }
+            </div>
+          ) : (
+            <Icon size={20} strokeWidth={innerActive ? 2.5 : 1.75} />
+          )}
+          <span>{label}</span>
+        </>
+      )}
+    </NavLink>
+  );
+}
 
 export default function Layout() {
   const { user, logout } = useAuth();
@@ -95,35 +130,8 @@ export default function Layout() {
 
       {/* Bottom nav (mobile-first) */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-800 flex justify-around py-2 z-50 transition-colors duration-200">
-        {navItems.map(({ to, icon: Icon, label }) => (
-          <NavLink
-            key={to}
-            to={to}
-            aria-current={({ isActive }) => isActive ? 'page' : undefined}
-            className={({ isActive }) =>
-              `flex flex-col items-center gap-0.5 px-3 py-1 rounded-lg transition-colors text-xs ${
-                isActive
-                  ? 'text-primary-500 font-semibold'
-                  : 'text-gray-500 hover:text-gray-300'
-              }`
-            }
-          >
-            {({ isActive }) => (
-              <>
-                {to === '/profile' && user ? (
-                  <div className={`w-5 h-5 rounded-full overflow-hidden flex items-center justify-center text-[10px] font-bold ${isActive ? 'ring-2 ring-primary-500' : ''} ${user.avatar_url ? '' : 'bg-primary-500 text-white'}`}>
-                    {user.avatar_url
-                      ? <img src={user.avatar_url} alt="avatar" className="w-full h-full object-cover" />
-                      : user.full_name?.[0]?.toUpperCase()
-                    }
-                  </div>
-                ) : (
-                  <Icon size={20} strokeWidth={isActive ? 2.5 : 1.75} />
-                )}
-                <span>{label}</span>
-              </>
-            )}
-          </NavLink>
+        {navItems.map((item) => (
+          <NavItem key={item.to} {...item} user={user} />
         ))}
       </nav>
     </div>

@@ -6,7 +6,19 @@ const db = require('../db');
 const cache = require('../utils/cache');
 const logger = require('../utils/logger');
 
-const SERVER_KEYPAIR = StellarSDK.Keypair.random();
+const SEP10_SIGNING_SECRET = process.env.SEP10_SIGNING_SECRET;
+let SERVER_KEYPAIR;
+
+if (SEP10_SIGNING_SECRET) {
+  SERVER_KEYPAIR = StellarSDK.Keypair.fromSecret(SEP10_SIGNING_SECRET);
+} else if (process.env.NODE_ENV === 'production') {
+  throw new Error(
+    'SEP10_SIGNING_SECRET must be set in production. ' +
+    'Set it to a Stellar secret key (starting with S) to enable deterministic SEP-10 signing.'
+  );
+} else {
+  SERVER_KEYPAIR = StellarSDK.Keypair.random();
+}
 const CHALLENGE_TIMEOUT = 15 * 60 * 1000; // 15 minutes
 const EXPIRY_BUFFER_SECONDS = 60; // refresh if token expires within 60s
 const SEP10_TOKEN_TTL = 24 * 60 * 60; // 24h default anchor token lifetime
@@ -25,10 +37,8 @@ function networkPassphrase() {
 // ---------------------------------------------------------------------------
 
 function generateChallenge(clientPublicKey) {
-  const server = StellarSDK.Keypair.fromPublicKey(SERVER_KEYPAIR.publicKey());
-
   const transaction = new StellarSDK.TransactionBuilder(
-    new StellarSDK.Account(server.publicKey(), '0'),
+    new StellarSDK.Account(SERVER_KEYPAIR.publicKey(), '0'),
     { fee: StellarSDK.BASE_FEE, networkPassphrase: networkPassphrase() }
   )
     .addOperation(
@@ -40,27 +50,24 @@ function generateChallenge(clientPublicKey) {
     .setTimeout(CHALLENGE_TIMEOUT / 1000)
     .build();
 
-  transaction.sign(server);
+  transaction.sign(SERVER_KEYPAIR);
   return transaction.toEnvelope().toXDR('base64');
 }
 
 function verifyChallenge(clientPublicKey, signedXDR) {
   try {
-    const transaction = StellarSDK.TransactionEnvelope.fromXDR(signedXDR, networkPassphrase());
-    const tx = transaction.transaction();
+    const transaction = StellarSDK.TransactionBuilder.fromXDR(signedXDR, networkPassphrase());
 
     const serverSigned = transaction.signatures.some(sig => {
       try {
-        StellarSDK.Keypair.fromPublicKey(SERVER_KEYPAIR.publicKey()).verify(tx.hash(), sig.signature());
-        return true;
+        return StellarSDK.Keypair.fromPublicKey(SERVER_KEYPAIR.publicKey()).verify(transaction.hash(), sig.signature());
       } catch { return false; }
     });
     if (!serverSigned) return false;
 
     const clientSigned = transaction.signatures.some(sig => {
       try {
-        StellarSDK.Keypair.fromPublicKey(clientPublicKey).verify(tx.hash(), sig.signature());
-        return true;
+        return StellarSDK.Keypair.fromPublicKey(clientPublicKey).verify(transaction.hash(), sig.signature());
       } catch { return false; }
     });
     return clientSigned;

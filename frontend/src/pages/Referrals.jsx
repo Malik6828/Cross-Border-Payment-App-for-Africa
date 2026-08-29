@@ -23,11 +23,15 @@ export default function Referrals() {
   const webLink = code ? `${window.location.origin}/register?ref=${code}` : '';
   const deepLink = code ? `${DEEP_LINK_PREFIX}?ref=${code}` : '';
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(webLink);
-    setCopied(true);
-    toast.success('Referral link copied!');
-    setTimeout(() => setCopied(false), 2000);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(webLink);
+      setCopied(true);
+      toast.success('Referral link copied!');
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Failed to copy referral link');
+    }
   };
 
   const handleShare = async () => {
@@ -63,7 +67,7 @@ export default function Referrals() {
         <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
           Invite friends to AfriPay. When they complete their first transaction, you earn a{' '}
           <span className="font-semibold text-primary-500">
-            {stats?.credit_per_referral_bps / 100}% fee discount credit
+            {(stats?.credit_per_referral_bps ?? 0) / 100}% fee discount credit
           </span>{' '}
           (valid 90 days).
         </p>

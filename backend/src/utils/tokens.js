@@ -28,7 +28,8 @@ const COOKIE_OPTIONS = {
 };
 
 function signAccessToken(payload) {
-  return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
+  const jti = crypto.randomBytes(16).toString('hex');
+  return jwt.sign({ ...payload, jti }, process.env.JWT_SECRET, { expiresIn: ACCESS_TOKEN_TTL });
 }
 
 /** Opaque refresh token; only SHA-256 hash is stored in the database. */

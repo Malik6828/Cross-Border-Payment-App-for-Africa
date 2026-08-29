@@ -104,7 +104,23 @@ soroban contract invoke \
   --new_wasm_hash <wasm-hash>
 ```
 
-### Step 6: Verify Upgrade
+### Step 6: Run Post-Upgrade Migration
+
+The escrow contract now includes an idempotent migration helper so versioned state changes can be applied after a WASM upgrade. After the upgrade is activated, invoke the migration with the contract admin:
+
+```bash
+soroban contract invoke \
+  --source <admin-keypair> \
+  --network <network> \
+  --contract-id <contract-id> \
+  -- \
+  migrate \
+  --admin <admin-address>
+```
+
+The helper records the current contract version in storage and will no-op once the contract is already at the latest version. The deployment helper in [contracts/deploy.sh](contracts/deploy.sh) also runs this migration automatically for escrow deployments.
+
+### Step 7: Verify Upgrade
 
 Verify the contract has been upgraded:
 

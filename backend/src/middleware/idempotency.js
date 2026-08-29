@@ -31,6 +31,9 @@ module.exports = async function idempotency(req, res, next) {
   const redisKey = `idem:payment:${key}`;
   const inFlightKey = `idem:inflight:${key}`;
 
+  // Compute hash up-front so it can be validated against any cached entry
+  const requestHash = hashBody(req.body);
+
   // Check in-flight marker before doing anything else
   const inFlight = await cache.get(inFlightKey);
   if (inFlight) {
@@ -40,6 +43,9 @@ module.exports = async function idempotency(req, res, next) {
   // Check Redis for a cached completed response
   const cached = await cache.get(redisKey);
   if (cached) {
+    if (cached.request_hash !== requestHash) {
+      return res.status(422).json({ error: 'Idempotency-Key reused with a different request body' });
+    }
     res.set('X-Idempotency-Replayed', 'true');
     return res.status(cached.statusCode).json(cached.body);
   }
@@ -52,6 +58,9 @@ module.exports = async function idempotency(req, res, next) {
 
   if (existing?.rows[0]) {
     const row = existing.rows[0];
+    if (row.request_hash !== requestHash) {
+      return res.status(422).json({ error: 'Idempotency-Key reused with a different request body' });
+    }
     res.set('X-Idempotency-Replayed', 'true');
     return res.status(row.status_code).json(row.response);
   }
@@ -59,13 +68,11 @@ module.exports = async function idempotency(req, res, next) {
   // Mark request as in-flight so concurrent duplicates get 409
   await cache.set(inFlightKey, '1', IN_FLIGHT_TTL);
 
-  const requestHash = hashBody(req.body);
-
   const originalJson = res.json.bind(res);
   res.json = async (body) => {
     await cache.del(inFlightKey);
     if (res.statusCode < 500) {
-      await cache.set(redisKey, { statusCode: res.statusCode, body }, TTL_SECONDS);
+      await cache.set(redisKey, { statusCode: res.statusCode, body, request_hash: requestHash }, TTL_SECONDS);
       await db.query(
         `INSERT INTO idempotency_keys (key, user_id, request_hash, status_code, response)
          VALUES ($1, $2, $3, $4, $5)

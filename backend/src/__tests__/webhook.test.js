@@ -26,6 +26,8 @@ jest.mock('../utils/symmetricEncryption', () => ({
 jest.mock('dns', () => ({
   promises: {
     lookup: jest.fn().mockResolvedValue({ address: '93.184.216.34', family: 4 }),
+    resolve4: jest.fn().mockResolvedValue(['93.184.216.34']),
+    resolve6: jest.fn().mockRejectedValue(new Error('ENODATA')),
   },
 }));
 
@@ -49,7 +51,10 @@ jest.mock('https', () => {
     return req;
   }
 
-  return { request, __setImpl: (fn) => { __mockImpl = fn; } };
+  // Stub Agent so pinnedAgent.js / ssrf.js can instantiate it without error
+  class Agent {}
+
+  return { request, Agent, __setImpl: (fn) => { __mockImpl = fn; } };
 });
 
 // Speed up exponential-backoff delays in all tests.

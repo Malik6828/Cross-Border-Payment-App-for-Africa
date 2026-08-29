@@ -1,8 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useReducer, useRef } from 'react';
-import { useNavigate, useSearchParams, useBeforeUnload } from 'react-router-dom';
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { useMemoValidation } from '../hooks/useMemoValidation';
 import { useNavigate, useSearchParams, useBeforeUnload, Link } from 'react-router-dom';
+import { useMemoValidation } from '../hooks/useMemoValidation';
 import {
   ArrowLeft,
   Send,
@@ -243,33 +241,6 @@ export default function SendMoney() {
       cancelled = true;
       clearTimeout(timer);
     };
-  // Fee estimation preview (Issue #641)
-  const [feePreview, setFeePreview] = useState(null);
-  const [feePreviewLoading, setFeePreviewLoading] = useState(false);
-  const [feePreviewError, setFeePreviewError] = useState(false);
-  useEffect(() => {
-    const amount = parseFloat(form.amount);
-    if (!amount || amount <= 0) {
-      setFeePreview(null);
-      setFeePreviewError(false);
-      return;
-    }
-    setFeePreviewLoading(true);
-    setFeePreviewError(false);
-    const timer = setTimeout(() => {
-      api
-        .get('/payments/fee-stats')
-        .then((r) => {
-          const feeBps = r.data?.fee_bps ?? 50;
-          const networkFeeXlm = r.data?.fee_xlm ?? 0.00001;
-          const platformFee = (amount * feeBps) / 10000;
-          const net = amount - platformFee;
-          setFeePreview({ amount, platformFee, feeBps, networkFeeXlm, net, asset: form.asset });
-        })
-        .catch(() => setFeePreviewError(true))
-        .finally(() => setFeePreviewLoading(false));
-    }, 300);
-    return () => clearTimeout(timer);
   }, [form.amount, form.asset]);
 
   // Warn the user before closing/refreshing the tab when the form has data

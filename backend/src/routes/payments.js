@@ -1,6 +1,6 @@
 const router = require("express").Router();
-﻿const router = require("express").Router();
 const { body, query, validationResult } = require("express-validator");
+const rateLimit = require("express-rate-limit");
 const StellarSdk = require("@stellar/stellar-sdk");
 const authMiddleware = require("../middleware/auth");
 const idempotency = require("../middleware/idempotency");
@@ -13,12 +13,15 @@ const {
   history,
   exportCSV,
   estimateFee,
+  estimateFees,
   getFeeStats,
   getFeeRate,
   findPath,
   sendPath,
   findReceivePathHandler,
   sendStrictReceivePath,
+  getPaymentById,
+  cancelPendingEscrow,
 } = require("../controllers/paymentController");
 const { buildTransaction, submitSigned } = require("../controllers/ledgerController");
 const { resolveFederationAddress } = require("../services/stellar");
@@ -51,7 +54,17 @@ const validate = (req, res, next) => {
 
 router.use(authMiddleware);
 
+const estimateFeesLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => req.user?.userId || req.ip,
+  message: { error: "Too many fee estimation requests. Limit: 60 per minute." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 router.get("/estimate-fee", estimateFee);
+router.get("/estimate-fees", estimateFeesLimiter, estimateFees);
 router.get("/fee-stats", getFeeStats);
 router.get("/fee-rate", getFeeRate);
 
@@ -97,26 +110,6 @@ router.get(
     }
   },
 );
-
-/**
- * POST /api/payments/send
- * @protected @idempotent
- * Idempotency-Key header prevents duplicate payments on client retry.
- * Closes #492
- */
-router.post(
-  "/send",
-  paymentSendValidators,
-  validate,
-  idempotency,
-  send,
-);
-
-/**
- * POST /api/payments/batch
- * @protected @idempotent
- */
-router.post("/batch", paymentBatchValidators, validate, idempotency, sendBatch);
 
 /**
  * @swagger
@@ -304,5 +297,29 @@ router.post(
 // User-specific analytics (accessible to all authenticated users)
 const { summary: userAnalyticsSummary } = require("../controllers/analyticsController");
 router.get("/analytics", userAnalyticsSummary);
+
+/**
+ * POST /api/payments/:id/cancel
+ * Cancel a pending escrow payment and refund the sender on-chain.
+ * The 48-hour lock must have elapsed before cancellation is allowed.
+ */
+router.post(
+  "/:id/cancel",
+  [
+    require("express-validator").param("id").isUUID().withMessage("id must be a valid UUID"),
+    validate,
+  ],
+  cancelPendingEscrow,
+);
+
+/**
+ * GET /api/payments/:id
+ * Returns a single payment with fee_breakdown.
+ * Must be after all named GET routes.
+ */
+router.get("/:id", [
+  require("express-validator").param("id").isUUID().withMessage("id must be a valid UUID"),
+  validate,
+], getPaymentById);
 
 module.exports = router;

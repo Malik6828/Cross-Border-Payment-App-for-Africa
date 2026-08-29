@@ -250,8 +250,8 @@ EXPECTED_HASH_FILE="${CONTRACT_DIR}/${CONTRACT_SUBDIR}/expected_hash.txt"
 echo "$EXPECTED_WASM_HASH" > "$EXPECTED_HASH_FILE"
 echo -e "${GREEN}✓ Expected WASM hash stored to $EXPECTED_HASH_FILE${NC}"
 
-# Step 5b: Write contract ID to .deployed_ids.env for backend configuration
-DEPLOYED_IDS_FILE="${CONTRACT_DIR}/.deployed_ids.env"
+# Step 5b: Write contract ID to contracts/.env so the backend can load it as an env var
+DEPLOYED_IDS_FILE="${CONTRACT_DIR}/.env"
 
 # Derive the env var name from the contract name (uppercase + _CONTRACT_ID)
 ENV_VAR_NAME=$(echo "${TARGET_CONTRACT}" | tr '[:lower:]-' '[:upper:]_')_CONTRACT_ID
@@ -306,17 +306,20 @@ case "$TARGET_CONTRACT" in
     fi
     ;;
   recurring-payments)
-    if [ -n "${USDC_ADDRESS:-}" ]; then
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${USDC_ADDRESS:-}" ]; then
+        FEE="${FEE_BPS:-0}"
         $SOROBAN_CLI contract invoke \
             --id "$CONTRACT_ID" \
             --source "$SOROBAN_SECRET_KEY" \
             --network "$NETWORK" \
             -- initialize \
-            --token_address "$USDC_ADDRESS"
+            --admin "$ADMIN_ADDRESS" \
+            --token_address "$USDC_ADDRESS" \
+            --fee_bps "$FEE"
         INIT_OK=true
     else
-        echo -e "${RED}WARNING: Set USDC_ADDRESS, then run:${NC}"
-        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --token_address \$USDC_ADDRESS"
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS and USDC_ADDRESS (and optionally FEE_BPS, default 0), then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --token_address \$USDC_ADDRESS --fee_bps \${FEE_BPS:-0}"
     fi
     ;;
   kyc-attestation)
@@ -403,6 +406,17 @@ esac
 
 if [ "$INIT_OK" = true ]; then
     echo -e "${GREEN}✓ Contract initialized. Admin: ${ADMIN_ADDRESS:-N/A}${NC}"
+
+    if [ "$TARGET_CONTRACT" = "escrow" ] && [ -n "${ADMIN_ADDRESS:-}" ]; then
+        echo -e "\n${YELLOW}Step 6a: Running escrow migration hook...${NC}"
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- migrate \
+            --admin "$ADMIN_ADDRESS"
+        echo -e "${GREEN}✓ Escrow migration hook executed${NC}"
+    fi
 else
     echo -e "${RED}Do not share this contract ID until initialize() has been called.${NC}"
 fi
@@ -424,8 +438,9 @@ echo "  Contract ID: $CONTRACT_ID"
 echo "  View on Stellar Expert: $EXPLORER_URL"
 echo ""
 echo -e "${YELLOW}Post-Deployment Checklist:${NC}"
-echo "  1. Source the deployed IDs into your backend .env:"
-echo "       cat contracts/.deployed_ids.env >> backend/.env"
+echo "  1. Load the deployed contract IDs into your backend:"
+echo "       cp contracts/.env backend/.env"
+echo "     Or append: cat contracts/.env >> backend/.env"
 echo "     Or manually copy: ${ENV_VAR_NAME}=${CONTRACT_ID}"
 echo "  2. initialize() was called automatically in Step 6 (if ADMIN_ADDRESS/USDC_ADDRESS were set)"
 echo "  3. Restart the backend service to pick up the new contract ID"

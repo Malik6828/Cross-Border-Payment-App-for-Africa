@@ -1,6 +1,8 @@
 const db = require('../db');
 const webpush = require('../services/webpush');
 const { startStreamForUser, stopStreamForUser } = require('../services/horizonWorker');
+const { persistAndBroadcast } = require('../services/notificationInbox');
+const logger = require('../utils/logger');
 
 /**
  * POST /api/notifications/subscribe
@@ -71,6 +73,7 @@ async function unsubscribe(req, res, next) {
 /**
  * Send a Web Push notification to a specific user by their DB user id.
  * Called internally by the Horizon streaming worker.
+ * Also persists to in-app notification inbox and broadcasts via Socket.IO.
  */
 async function sendPushToUser(userId, payload) {
   const { rows } = await db.query(
@@ -78,6 +81,15 @@ async function sendPushToUser(userId, payload) {
     [userId],
   );
   const row = rows[0];
+
+  if (payload) {
+    try {
+      await persistAndBroadcast(userId, 'push', payload.title, payload.body, payload.data);
+    } catch (err) {
+      logger.warn('Failed to persist notification', { error: err.message, userId });
+    }
+  }
+
   if (!row?.push_subscription) return;
 
   try {

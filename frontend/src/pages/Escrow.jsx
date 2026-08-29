@@ -25,7 +25,7 @@ export default function Escrow() {
   const [partialAmount, setPartialAmount] = useState('');
   const [partialLoading, setPartialLoading] = useState(false);
 
-  const FEE_BPS = 250; // platform fee fallback (2.5%)
+  const feeBps = partialEscrow?.fee_bps ?? 250; // platform fee from escrow, fallback 2.5%
 
   const remainingBalance = (escrow) =>
     parseFloat(escrow.amount) - parseFloat(escrow.released_amount || 0);
@@ -65,6 +65,27 @@ export default function Escrow() {
       return;
     }
 
+    // Validate Stellar address format (56 chars, starts with 'G')
+    const validateWallet = (addr, label) => {
+      const trimmed = addr.trim();
+      if (!trimmed.startsWith('G')) {
+        toast.error(`${label} must be a valid Stellar address (starts with G)`);
+        return false;
+      }
+      if (trimmed.length !== 56) {
+        toast.error(`${label} must be 56 characters (got ${trimmed.length})`);
+        return false;
+      }
+      if (!/^[A-Z0-9]+$/.test(trimmed)) {
+        toast.error(`${label} contains invalid characters`);
+        return false;
+      }
+      return true;
+    };
+
+    if (!validateWallet(createForm.agent_wallet, 'Agent wallet')) return;
+    if (!validateWallet(createForm.recipient_wallet, 'Recipient wallet')) return;
+
     setLoading(true);
     try {
       const { data } = await api.post('/escrow/create', createForm);
@@ -79,7 +100,12 @@ export default function Escrow() {
     }
   };
 
-  const handleConfirmEscrow = async (escrowId) => {
+  const handleConfirmEscrow = async (escrowId, escrow) => {
+    const remaining = remainingBalance(escrow);
+    if (!window.confirm(
+      `Are you sure you want to fully release the remaining ${remaining} ${escrow.asset}? This action cannot be undone.`
+    )) return;
+
     setLoading(true);
     try {
       await api.post(`/escrow/${escrowId}/confirm`);
@@ -146,7 +172,7 @@ export default function Escrow() {
   };
 
   const previewAmount = parseFloat(partialAmount) || 0;
-  const previewFee = (previewAmount * FEE_BPS) / 10000;
+  const previewFee = (previewAmount * feeBps) / 10000;
   const previewNet = previewAmount - previewFee;
   const partialError =
     partialEscrow && previewAmount > 0 && previewAmount > remainingBalance(partialEscrow)
@@ -310,7 +336,7 @@ export default function Escrow() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              handleConfirmEscrow(escrow.id);
+                              handleConfirmEscrow(escrow.id, escrow);
                             }}
                             disabled={loading}
                             className="flex-1 min-w-[120px] bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
@@ -384,7 +410,7 @@ export default function Escrow() {
                   <span className="text-gray-900 dark:text-white">{previewAmount.toFixed(7)} {partialEscrow.asset}</span>
                 </div>
                 <div className="flex justify-between text-gray-600 dark:text-gray-400">
-                  <span>Platform fee ({(FEE_BPS / 100).toFixed(2)}%)</span>
+                  <span>Platform fee ({(feeBps / 100).toFixed(2)}%)</span>
                   <span className="text-red-500">-{previewFee.toFixed(7)} {partialEscrow.asset}</span>
                 </div>
                 <div className="flex justify-between font-medium border-t border-gray-200 dark:border-gray-700 pt-1 mt-1">

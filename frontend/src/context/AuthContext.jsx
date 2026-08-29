@@ -65,7 +65,7 @@ export function AuthProvider({ children }) {
     Sentry.setUser(null);
   };
 
-  const updateUser = (fields) => setUser((prev) => (prev ? { ...prev, ...fields } : prev));
+  const updateUser = (fields) => setUser((prev) => (prev ? { ...prev, ...fields } : fields));
 
   return (
     <AuthContext.Provider value={{ user, loading, login, register, logout, updateUser }}>

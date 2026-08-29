@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, ShieldCheck, Building2, Webhook, RefreshCw, Eye, EyeOff } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, ShieldCheck, Building2, Webhook, RefreshCw, Eye, EyeOff, Copy, CheckCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
@@ -20,6 +20,8 @@ export default function BusinessSettings() {
   const [webhooksLoading, setWebhooksLoading] = useState(true);
   const [rotating, setRotating] = useState(null);
   const [rotateConfirm, setRotateConfirm] = useState(null);
+  const [revealedSecret, setRevealedSecret] = useState(null);
+  const [copiedSecret, setCopiedSecret] = useState(null);
 
   const isBusiness = user?.account_type === 'business';
 
@@ -42,6 +44,8 @@ export default function BusinessSettings() {
     try {
       const { data } = await api.post(`/webhooks/${webhookId}/rotate-secret`);
       setWebhooks(prev => prev.map(w => w.id === webhookId ? { ...w, secret: data.secret } : w));
+      // Auto-reveal the new secret so the user can copy it before it's masked
+      setRevealedSecret(webhookId);
       toast.success('Secret rotated successfully');
     } catch (err) {
       toast.error(err.response?.data?.error || 'Failed to rotate secret');
@@ -49,6 +53,12 @@ export default function BusinessSettings() {
       setRotating(null);
       setRotateConfirm(null);
     }
+  };
+
+  const copyWebhookSecret = (id, secret) => {
+    navigator.clipboard.writeText(secret);
+    setCopiedSecret(id);
+    setTimeout(() => setCopiedSecret(null), 2000);
   };
 
   const handleUpgrade = async () => {
@@ -67,10 +77,26 @@ export default function BusinessSettings() {
 
   const handleAddSigner = async (e) => {
     e.preventDefault();
+
+    // Validate Stellar public key format before submitting
+    const key = newKey.trim();
+    if (!key.startsWith('G')) {
+      toast.error('Invalid Stellar address — must start with "G"');
+      return;
+    }
+    if (key.length !== 56) {
+      toast.error(`Invalid Stellar address — must be 56 characters (got ${key.length})`);
+      return;
+    }
+    if (!/^[A-Z0-9]+$/.test(key)) {
+      toast.error('Invalid Stellar address — contains invalid characters');
+      return;
+    }
+
     setAdding(true);
     try {
-      const res = await api.post('/wallet/signers', { signer_public_key: newKey.trim(), label: newLabel.trim() || undefined });
-      setSigners(prev => [...prev, { signer_public_key: newKey.trim(), label: newLabel.trim() || null, added_at: new Date().toISOString() }]);
+      const res = await api.post('/wallet/signers', { signer_public_key: key, label: newLabel.trim() || undefined });
+      setSigners(prev => [...prev, { signer_public_key: key, label: newLabel.trim() || null, added_at: new Date().toISOString() }]);
       setNewKey('');
       setNewLabel('');
       toast.success('Signer added');
@@ -242,8 +268,22 @@ export default function BusinessSettings() {
                   <div className="bg-gray-700/50 rounded-lg px-3 py-2 flex items-center gap-2">
                     <span className="text-xs text-gray-400 shrink-0">Secret:</span>
                     <span className="text-xs font-mono text-yellow-400 flex-1 truncate">
-                      ••••••••••••••••
+                      {revealedSecret === wh.id ? wh.secret : '••••••••••••••••'}
                     </span>
+                    <button
+                      onClick={() => setRevealedSecret(revealedSecret === wh.id ? null : wh.id)}
+                      className="text-gray-500 hover:text-gray-300 shrink-0"
+                      aria-label={revealedSecret === wh.id ? 'Hide secret' : 'Reveal secret'}
+                    >
+                      {revealedSecret === wh.id ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                    <button
+                      onClick={() => copyWebhookSecret(wh.id, wh.secret)}
+                      className="text-gray-500 hover:text-gray-300 shrink-0"
+                      aria-label="Copy secret"
+                    >
+                      {copiedSecret === wh.id ? <CheckCheck size={14} className="text-green-400" /> : <Copy size={14} />}
+                    </button>
                   </div>
                 )}
 

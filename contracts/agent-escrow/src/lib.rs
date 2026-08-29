@@ -25,6 +25,12 @@ pub enum DataKey {
     Fees,
     CancelWindow,
     Escrow(u64),
+    InsuranceFund,
+    InsuranceContributionBps,
+    /// bool flag: true if the address is a registered agent.
+    RegisteredAgent(Address),
+    /// Vec<Address> of all registered agents (bounded to 10000).
+    AgentList,
 }
 
 // ── Domain types ──────────────────────────────────────────────────────────────
@@ -57,35 +63,90 @@ pub struct AgentEscrow {
     pub created_at: u64,
     /// Unix timestamp after which the sender may cancel (created_at + 48 h).
     pub expires_at: u64,
+    /// Cumulative amount already released via partial_confirm_payout (stroops).
+    pub released_amount: i128,
 }
 
 // ── Event payloads ────────────────────────────────────────────────────────────
 
+/// Emitted by `create_escrow`. Topics: ("AgentEscrow", "EscrowCreated").
 #[derive(Clone)]
 #[contracttype]
-pub struct EvtCreated {
+pub struct EvtEscrowCreated {
     pub escrow_id: u64,
     pub sender: Address,
     pub recipient: Address,
     pub agent: Address,
     pub amount: i128,
-    pub fee_bps: u32,
     pub expires_at: u64,
 }
 
+/// Emitted by `confirm_payout` and `admin_release` (to_agent=true).
+/// Topics: ("AgentEscrow", "EscrowConfirmed").
 #[derive(Clone)]
 #[contracttype]
-pub struct EvtCompleted {
+pub struct EvtEscrowConfirmed {
     pub escrow_id: u64,
+    pub agent: Address,
     pub agent_amount: i128,
     pub fee_amount: i128,
 }
 
+/// Emitted by `cancel_escrow` and `admin_release` (to_agent=false).
+/// Topics: ("AgentEscrow", "EscrowCancelled").
 #[derive(Clone)]
 #[contracttype]
-pub struct EvtCancelled {
+pub struct EvtEscrowCancelled {
     pub escrow_id: u64,
+    pub sender: Address,
     pub refund_amount: i128,
+}
+
+/// Emitted by `admin_release` in addition to the outcome event.
+/// Topics: ("AgentEscrow", "AdminOverride").
+#[derive(Clone)]
+#[contracttype]
+pub struct AdminOverride {
+    pub escrow_id: u64,
+    pub admin: Address,
+    pub to_agent: bool,
+    pub amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct InsuranceFundContribution {
+    pub escrow_id: u64,
+    pub amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct EvtAgentRegistered {
+    pub agent: Address,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct EvtAgentRemoved {
+    pub agent: Address,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct InsurancePayout {
+    pub escrow_id: u64,
+    pub recipient: Address,
+    pub amount: i128,
+pub struct EvtPartialPayoutReleased {
+    pub escrow_id: u64,
+    pub agent: Address,
+    /// Amount released in this call (after pro-rata fee deduction), in stroops.
+    pub released_amount: i128,
+    /// Gross escrow amount not yet released (before fee), in stroops.
+    pub remaining_amount: i128,
+    /// Platform fee deducted from this partial release, in stroops.
+    pub fee_amount: i128,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -109,6 +170,73 @@ impl AgentEscrowContract {
         env.storage().persistent().set(&DataKey::UsdcAddress, &usdc_address);
         env.storage().persistent().set(&DataKey::CancelWindow, &cancel_window_seconds);
         env.storage().persistent().set(&DataKey::Counter, &0u64);
+        env.storage().persistent().set(&DataKey::InsuranceFund, &0i128);
+        env.storage().persistent().set(&DataKey::InsuranceContributionBps, &500u32); // 5% default
+        env.storage().persistent().set(&DataKey::AgentList, &soroban_sdk::Vec::<Address>::new(&env));
+    }
+
+    /// Register an agent address in the whitelist. Admin only.
+    /// Emits AgentRegistered event.
+    pub fn register_agent(env: Env, agent: Address) {
+        let admin: Address = env.storage().persistent().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        if env.storage().persistent().get::<DataKey, bool>(&DataKey::RegisteredAgent(agent.clone())).unwrap_or(false) {
+            return; // already registered, idempotent
+        }
+        let mut list: soroban_sdk::Vec<Address> = env.storage().persistent()
+            .get(&DataKey::AgentList).unwrap_or(soroban_sdk::Vec::new(&env));
+        if list.len() >= 10000 {
+            panic!("Agent list capacity reached");
+        }
+        list.push_back(agent.clone());
+        env.storage().persistent().set(&DataKey::AgentList, &list);
+        env.storage().persistent().set(&DataKey::RegisteredAgent(agent.clone()), &true);
+        env.events().publish(
+            (Symbol::new(&env, "AgentRegistered"),),
+            EvtAgentRegistered { agent },
+        );
+    }
+
+    /// Remove an agent address from the whitelist. Admin only.
+    /// Emits AgentRemoved event.
+    pub fn remove_agent(env: Env, agent: Address) {
+        let admin: Address = env.storage().persistent().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::RegisteredAgent(agent.clone()));
+        let list: soroban_sdk::Vec<Address> = env.storage().persistent()
+            .get(&DataKey::AgentList).unwrap_or(soroban_sdk::Vec::new(&env));
+        let mut new_list: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        for a in list.iter() {
+            if a != agent { new_list.push_back(a); }
+        }
+        env.storage().persistent().set(&DataKey::AgentList, &new_list);
+        env.events().publish(
+            (Symbol::new(&env, "AgentRemoved"),),
+            EvtAgentRemoved { agent },
+        );
+    }
+
+    /// Returns true if the address is a registered agent.
+    pub fn is_registered_agent(env: Env, agent: Address) -> bool {
+        env.storage().persistent()
+            .get::<DataKey, bool>(&DataKey::RegisteredAgent(agent))
+            .unwrap_or(false)
+    }
+
+    /// Returns a paginated list of registered agents.
+    /// `start` is the 0-based index; `limit` is capped at 100.
+    pub fn get_registered_agents(env: Env, start: u32, limit: u32) -> soroban_sdk::Vec<Address> {
+        let cap = if limit > 100 { 100 } else { limit };
+        let list: soroban_sdk::Vec<Address> = env.storage().persistent()
+            .get(&DataKey::AgentList).unwrap_or(soroban_sdk::Vec::new(&env));
+        let mut result: soroban_sdk::Vec<Address> = soroban_sdk::Vec::new(&env);
+        let len = list.len();
+        let mut i = start;
+        while i < len && (i - start) < cap {
+            result.push_back(list.get(i).unwrap());
+            i += 1;
+        }
+        result
     }
 
     /// Lock USDC in escrow pending agent payout confirmation.
@@ -138,6 +266,14 @@ impl AgentEscrowContract {
         }
 
         sender.require_auth();
+
+        // Validate agent is whitelisted
+        if !env.storage().persistent()
+            .get::<DataKey, bool>(&DataKey::RegisteredAgent(agent.clone()))
+            .unwrap_or(false)
+        {
+            panic!("Agent not registered");
+        }
 
         let usdc: Address = env
             .storage()
@@ -179,12 +315,13 @@ impl AgentEscrowContract {
             status: EscrowStatus::Pending,
             created_at: now,
             expires_at,
+            released_amount: 0,
         };
         env.storage().persistent().set(&DataKey::Escrow(id), &escrow);
 
         env.events().publish(
-            (Symbol::new(&env, "EscrowCreated"),),
-            EvtCreated { escrow_id: id, sender, recipient, agent, amount, fee_bps, expires_at },
+            (Symbol::new(&env, "AgentEscrow"), Symbol::new(&env, "EscrowCreated")),
+            EvtEscrowCreated { escrow_id: id, sender, recipient, agent, amount, expires_at },
         );
 
         id
@@ -193,6 +330,7 @@ impl AgentEscrowContract {
     /// Agent confirms off-chain fiat delivery, releasing USDC from escrow.
     ///
     /// Transfers `(amount - fee)` to the agent and accumulates the fee.
+    /// A portion of the fee is contributed to the insurance fund.
     /// Only the designated agent may call this function.
     ///
     /// # Arguments
@@ -229,6 +367,104 @@ impl AgentEscrowContract {
             &agent_amount,
         );
 
+        // Calculate insurance contribution
+        let contribution_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InsuranceContributionBps)
+            .unwrap_or(500);
+        let insurance_contribution = (fee_amount * contribution_bps as i128) / 10_000;
+        let fee_to_distribute = fee_amount - insurance_contribution;
+
+        // Add to insurance fund
+        let insurance_balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InsuranceFund)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&DataKey::InsuranceFund, &(insurance_balance + insurance_contribution));
+
+        // Add remaining fee to distributable fees
+        let fees: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Fees)
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Fees, &(fees + fee_to_distribute));
+
+        escrow.status = EscrowStatus::Completed;
+        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
+
+        env.events().publish(
+            (Symbol::new(&env, "AgentEscrow"), Symbol::new(&env, "EscrowConfirmed")),
+            EvtEscrowConfirmed { escrow_id, agent, agent_amount, fee_amount },
+        );
+    }
+
+    /// Release a portion of the escrowed USDC to the agent.
+    ///
+    /// The agent delivers cash in installments off-chain and calls this
+    /// function for each installment. The contract deducts a pro-rata
+    /// platform fee from each release. When the cumulative `released_amount`
+    /// equals the original `amount`, the escrow is automatically marked
+    /// `Completed`.
+    ///
+    /// Emits a `PartialPayoutReleased` event on every call.
+    ///
+    /// # Arguments
+    /// * `agent`     — Must match the agent recorded in the escrow.
+    /// * `escrow_id` — ID returned by `create_escrow`.
+    /// * `amount`    — Gross amount to release in this call (stroops, > 0).
+    ///                 Must not exceed `original_amount - released_amount`.
+    pub fn partial_confirm_payout(env: Env, agent: Address, escrow_id: u64, amount: i128) {
+        if amount <= 0 {
+            panic!("amount must be positive");
+        }
+
+        agent.require_auth();
+
+        let mut escrow: AgentEscrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("escrow not found");
+
+        if agent != escrow.agent {
+            panic!("unauthorized: caller is not the escrow agent");
+        }
+        if escrow.status != EscrowStatus::Pending {
+            panic!("escrow is not pending");
+        }
+        if env.ledger().timestamp() >= escrow.expires_at {
+            panic!("escrow has expired");
+        }
+
+        let remaining_gross = escrow.amount - escrow.released_amount;
+        if amount > remaining_gross {
+            panic!("Release exceeds remaining balance");
+        }
+
+        // Pro-rata fee: same fee_bps applied to this partial amount.
+        let fee_amount = (amount * escrow.fee_bps as i128) / 10_000;
+        let net_to_agent = amount - fee_amount;
+
+        let usdc: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcAddress)
+            .unwrap();
+
+        token::Client::new(&env, &usdc).transfer(
+            &env.current_contract_address(),
+            &escrow.agent,
+            &net_to_agent,
+        );
+
+        // Accumulate platform fee.
         let fees: i128 = env
             .storage()
             .persistent()
@@ -238,12 +474,32 @@ impl AgentEscrowContract {
             .persistent()
             .set(&DataKey::Fees, &(fees + fee_amount));
 
-        escrow.status = EscrowStatus::Completed;
+        // Update released_amount and auto-complete when fully settled.
+        escrow.released_amount += amount;
+        if escrow.released_amount == escrow.amount {
+            escrow.status = EscrowStatus::Completed;
+        }
+
+        let remaining_after = escrow.amount - escrow.released_amount;
         env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
 
         env.events().publish(
-            (Symbol::new(&env, "PayoutConfirmed"),),
-            EvtCompleted { escrow_id, agent_amount, fee_amount },
+            (Symbol::new(&env, "PartialPayoutReleased"),),
+            EvtPartialPayoutReleased {
+                escrow_id,
+                agent: escrow.agent,
+                released_amount: net_to_agent,
+                remaining_amount: remaining_after,
+                fee_amount,
+            },
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "InsuranceFundContribution"),),
+            InsuranceFundContribution {
+                escrow_id,
+                amount: insurance_contribution,
+            },
         );
     }
 
@@ -290,8 +546,8 @@ impl AgentEscrowContract {
         env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
 
         env.events().publish(
-            (Symbol::new(&env, "EscrowCancelled"),),
-            EvtCancelled { escrow_id, refund_amount: escrow.amount },
+            (Symbol::new(&env, "AgentEscrow"), Symbol::new(&env, "EscrowCancelled")),
+            EvtEscrowCancelled { escrow_id, sender: escrow.sender.clone(), refund_amount: escrow.amount },
         );
     }
 
@@ -351,5 +607,201 @@ impl AgentEscrowContract {
         );
 
         env.storage().persistent().set(&DataKey::Fees, &(fees - amount));
+    }
+
+    /// Update the admin address. Only the current admin may call this.
+    ///
+    /// # Arguments
+    /// * `new_admin` — Address that will become the new admin.
+    pub fn update_admin(env: Env, new_admin: Address) {
+        let stored_admin: Address =
+            env.storage().persistent().get(&DataKey::Admin).unwrap();
+        if new_admin == stored_admin {
+            panic!("new admin must differ from current admin");
+        }
+        env.storage().persistent().set(&DataKey::Admin, &new_admin);
+    }
+
+    /// Admin override to release or refund a pending escrow before timeout.
+    ///
+    /// If `to_agent` is true, transfers the full amount (minus platform fee) to the agent.
+    /// If `to_agent` is false, refunds the full amount to the sender.
+    ///
+    /// # Arguments
+    /// * `escrow_id` — ID of the escrow to override.
+    /// * `to_agent`  — true to release to agent, false to refund sender.
+    pub fn admin_release(env: Env, escrow_id: u64, to_agent: bool) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap();
+        admin.require_auth();
+
+        let mut escrow: AgentEscrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("escrow not found");
+
+        if escrow.status != EscrowStatus::Pending {
+            panic!("escrow is not pending");
+        }
+
+        let fee_amount = (escrow.amount * escrow.fee_bps as i128) / 10_000;
+        let net_amount = escrow.amount - fee_amount;
+
+        let usdc: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcAddress)
+            .unwrap();
+
+        if to_agent {
+            token::Client::new(&env, &usdc).transfer(
+                &env.current_contract_address(),
+                &escrow.agent,
+                &net_amount,
+            );
+            escrow.status = EscrowStatus::Completed;
+
+            let fees: i128 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Fees)
+                .unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&DataKey::Fees, &(fees + fee_amount));
+
+            env.events().publish(
+                (Symbol::new(&env, "AgentEscrow"), Symbol::new(&env, "EscrowConfirmed")),
+                EvtEscrowConfirmed {
+                    escrow_id,
+                    agent: escrow.agent.clone(),
+                    agent_amount: net_amount,
+                    fee_amount,
+                },
+            );
+        } else {
+            token::Client::new(&env, &usdc).transfer(
+                &env.current_contract_address(),
+                &escrow.sender,
+                &escrow.amount,
+            );
+            escrow.status = EscrowStatus::Cancelled;
+
+            env.events().publish(
+                (Symbol::new(&env, "AgentEscrow"), Symbol::new(&env, "EscrowCancelled")),
+                EvtEscrowCancelled {
+                    escrow_id,
+                    sender: escrow.sender.clone(),
+                    refund_amount: escrow.amount,
+                },
+            );
+        }
+
+        env.storage().persistent().set(&DataKey::Escrow(escrow_id), &escrow);
+
+        env.events().publish(
+            (Symbol::new(&env, "AgentEscrow"), Symbol::new(&env, "AdminOverride")),
+            AdminOverride {
+                escrow_id,
+                admin,
+                to_agent,
+                amount: escrow.amount,
+            },
+        );
+    }
+
+    /// Return the current insurance fund balance.
+    pub fn get_insurance_balance(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::InsuranceFund)
+            .unwrap_or(0)
+    }
+
+    /// Admin-only function to payout from the insurance fund to a defrauded recipient.
+    ///
+    /// # Arguments
+    /// * `escrow_id` — ID of the escrow that was fraudulent.
+    /// * `recipient` — Address to receive the insurance payout.
+    pub fn insurance_payout(env: Env, escrow_id: u64, recipient: Address) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap();
+        admin.require_auth();
+
+        let escrow: AgentEscrow = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Escrow(escrow_id))
+            .expect("escrow not found");
+
+        let insurance_balance: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::InsuranceFund)
+            .unwrap_or(0);
+
+        // Pay up to the original escrow amount or available balance
+        let payout_amount = if escrow.amount <= insurance_balance {
+            escrow.amount
+        } else {
+            insurance_balance
+        };
+
+        if payout_amount == 0 {
+            panic!("insufficient insurance fund balance");
+        }
+
+        let usdc: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UsdcAddress)
+            .unwrap();
+
+        token::Client::new(&env, &usdc).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &payout_amount,
+        );
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::InsuranceFund, &(insurance_balance - payout_amount));
+
+        env.events().publish(
+            (Symbol::new(&env, "InsurancePayout"),),
+            InsurancePayout {
+                escrow_id,
+                recipient,
+                amount: payout_amount,
+            },
+        );
+    }
+
+    /// Update the insurance contribution rate. Admin-only.
+    ///
+    /// # Arguments
+    /// * `new_bps` — New contribution rate in basis points (max 1000 = 10%).
+    pub fn update_insurance_contribution_bps(env: Env, new_bps: u32) {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap();
+        admin.require_auth();
+
+        if new_bps > 1000 {
+            panic!("contribution rate cannot exceed 1000 bps (10%)");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::InsuranceContributionBps, &new_bps);
     }
 }

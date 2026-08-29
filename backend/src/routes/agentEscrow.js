@@ -32,6 +32,14 @@ router.post(
 );
 
 router.post(
+  "/:id/confirm-payout",
+  [param("id").isUUID().withMessage("Invalid escrow ID")],
+  validate,
+  confirm
+);
+
+// Legacy alias kept for backward compatibility
+router.post(
   "/:id/confirm",
   [param("id").isUUID().withMessage("Invalid escrow ID")],
   validate,

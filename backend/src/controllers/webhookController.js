@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const db = require('../db');
 const { validatePublicUrl } = require('../utils/ssrfValidator');
+const { validateOutboundUrl } = require('../utils/ssrf');
 const { encryptSecret, decryptSecret } = require('../utils/symmetricEncryption');
 
 const VALID_EVENTS = ['payment.sent', 'payment.received', 'payment.failed'];
@@ -9,8 +10,23 @@ async function create(req, res, next) {
   try {
     const { url, events } = req.body;
 
-    if (!await validatePublicUrl(url)) {
-      return res.status(400).json({ error: 'Webhook URL must point to a public HTTPS endpoint' });
+    // Webhook endpoints must be HTTPS to protect the HMAC secret in transit
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url);
+    } catch {
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
+    if (parsedUrl.protocol !== 'https:') {
+      return res.status(400).json({ error: 'Webhook URL must use HTTPS' });
+    }
+
+    const ssrfCheck = await validateOutboundUrl(url);
+    if (!ssrfCheck.valid) {
+      return res.status(400).json({
+        error: 'SSRF_BLOCKED',
+        message: 'The provided URL resolves to a restricted network range.',
+      });
     }
 
     const invalidEvents = (events || []).filter((e) => !VALID_EVENTS.includes(e));
@@ -146,3 +162,47 @@ async function retry(req, res, next) {
 }
 
 module.exports = { create, list, listDeliveries, retry, rotateSecret };
+async function update(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { url, events, active } = req.body;
+
+    // Verify ownership
+    const { rows: owned } = await db.query(
+      `SELECT id FROM webhooks WHERE id = $1 AND user_id = $2`,
+      [id, req.user.userId]
+    );
+    if (!owned.length) return res.status(404).json({ error: 'Webhook not found' });
+
+    if (url !== undefined) {
+      const ssrfCheck = await validateOutboundUrl(url);
+      if (!ssrfCheck.valid) {
+        return res.status(400).json({
+          error: 'SSRF_BLOCKED',
+          message: 'The provided URL resolves to a restricted network range.',
+        });
+      }
+    }
+
+    const invalidEvents = (events || []).filter((e) => !VALID_EVENTS.includes(e));
+    if (invalidEvents.length) {
+      return res.status(400).json({ error: `Invalid events: ${invalidEvents.join(', ')}` });
+    }
+
+    const { rows } = await db.query(
+      `UPDATE webhooks
+       SET url = COALESCE($1, url),
+           events = COALESCE($2, events),
+           active = COALESCE($3, active)
+       WHERE id = $4 AND user_id = $5
+       RETURNING id, url, events, active, created_at`,
+      [url || null, events || null, active !== undefined ? active : null, id, req.user.userId]
+    );
+
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { create, update, list, listDeliveries, retry };

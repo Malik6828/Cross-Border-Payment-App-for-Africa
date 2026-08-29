@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
+import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
 import { Eye, EyeOff, ArrowLeft, ChevronDown, ChevronUp, Check, X, AlertCircle, Phone } from 'lucide-react';
@@ -15,7 +16,6 @@ export default function Register() {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [showPINSetup, setShowPINSetup] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [secretKey, setSecretKey] = useState('');
   const [showSecretKey, setShowSecretKey] = useState(false);
@@ -103,13 +103,23 @@ export default function Register() {
 
   const handlePhoneVerify = async (e) => {
     e.preventDefault();
+    if (!phoneOtp || phoneOtp.length !== 6) {
+      toast.error('Please enter a valid 6-digit OTP');
+      return;
+    }
     setPhoneVerifyLoading(true);
     try {
-      // Note: This requires authentication, so user needs to login first
-      toast.success('Account created. Please log in to verify your phone number.');
-      navigate('/login');
+      await api.post('/auth/verify-phone', { phone: registeredPhone, otp: phoneOtp });
+      toast.success('Phone number verified successfully!');
+      setShowPhoneVerify(false);
+      const redirect = sessionStorage.getItem('afripay_redirect');
+      if (redirect) {
+        navigate('/login?redirect=' + encodeURIComponent(redirect));
+      } else {
+        navigate('/login');
+      }
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to verify phone');
+      toast.error(err.response?.data?.error || 'Failed to verify phone. Please check your OTP and try again.');
     } finally {
       setPhoneVerifyLoading(false);
     }

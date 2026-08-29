@@ -247,24 +247,9 @@ export default function TransactionHistory() {
       },
       { rootMargin: '200px' }
     );
-  }, [currentPage, setSearchParams]);
-
-  const loadMore = () => {
-    if (!nextCursor) return;
-    setLoadingMore(true);
-    const nextPage = currentPage + 1;
-    const params = buildHistoryParams(nextCursor, dateFrom, dateTo, asset, selectedStatuses);
-    api
-      .get('/payments/history', { params })
-      .then((r) => {
-        setTransactions((prev) => [...prev, ...r.data.transactions]);
-        setHasMore(r.data.has_more);
-        setNextCursor(r.data.next_cursor || null);
-        setCurrentPage(nextPage);
-      })
-      .catch(() => {})
-      .finally(() => setLoadingMore(false));
-  };
+    observer.observe(sentinelRef.current);
+    return () => observer.disconnect();
+  }, [hasMore, loadingMore, loadMore]);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -570,7 +555,7 @@ export default function TransactionHistory() {
           aria-live="polite"
           className="flex items-center justify-between text-xs text-gray-500 mb-3 px-1"
         >
-          <span>Page {currentPage}</span>
+          <span>{transactions.length} loaded</span>
           <span>
             {activeFilterCount > 0
               ? `Showing ${filtered.length} transaction${filtered.length !== 1 ? 's' : ''}`

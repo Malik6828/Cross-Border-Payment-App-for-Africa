@@ -153,6 +153,26 @@
     "warning": "Only send XLM or Stellar-based assets to this address",
     "address_copied": "Address copied!"
   },
+  "swap": {
+    "title": "Swap",
+    "dex_rate": "DEX rate",
+    "slippage_tolerance": "Slippage Tolerance",
+    "custom": "Custom",
+    "high_slippage_warning": "High slippage tolerance — your trade may result in an unfavorable price.",
+    "you_sell": "You sell",
+    "you_receive_est": "You receive (est.)",
+    "minimum_received": "Minimum received: {{amount}} {{asset}} ({{slippage}}% slippage)",
+    "high_price_impact": "High price impact ({{pct}}%). Your order is large relative to available liquidity — you may receive significantly less than the quoted amount.",
+    "confirm_swap": "Confirm swap",
+    "confirm_swap_detail": "Sell {{sellAmount}} {{sellAsset}} for approximately {{estimatedReceived}} {{buyAsset}}?",
+    "price_locked": "Price is locked — auto-refresh paused.",
+    "swapping": "Swapping…",
+    "confirm_swap_button": "Confirm Swap",
+    "swap_button": "Swap {{sellAsset}} → {{buyAsset}}",
+    "swap_complete": "Swap complete",
+    "sold": "Sold {{amount}} {{asset}}",
+    "est_received": "Est. received {{amount}} {{asset}}"
+  },
   "history": {
     "title": "History",
     "filter_all": "all",

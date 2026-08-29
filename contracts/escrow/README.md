@@ -698,6 +698,41 @@ soroban contract deploy \
 - `withdraw_fees` can only be called by the stored admin.
 - Fees are stored in `AccumulatedFees` and never directly withdrawable by non-admin accounts.
 
+## Security Audit Checklist
+
+### Re-Entrancy
+- Soroban prevents re-entrancy by disallowing cross-contract calls that re-enter the same contract instance within a single transaction invocation.
+- All functions that make external token calls (`create_escrow`, `release_escrow`, `cancel_escrow`, `expire_escrow`) follow the **checks-effects-interactions** pattern: contract storage state is updated before any `token.transfer` call.
+  - `create_escrow`: escrow record written to storage before `token.transfer`.
+  - `release_escrow`: status set to `Released` and fees accumulated before `token.transfer`.
+  - `cancel_escrow`: status set to `Cancelled` before `token.transfer` refund.
+
+### Integer Overflow
+- Soroban uses `i128` for token amounts with checked arithmetic.
+- The escrow counter uses `checked_add` to prevent overflow.
+
+### Access Control
+- `initialize`: no auth required (single-use, blocked on re-call).
+- `create_escrow`: `sender.require_auth()`.
+- `release_escrow`: `agent.require_auth()` + agent address match.
+- `cancel_escrow`: `sender.require_auth()` + sender address match.
+- `withdraw_fees`: `admin.require_auth()` + stored admin match.
+- `upgrade`, `migrate`, `set_retention_period`, `cleanup_escrow`, `update_fee`, `set_kyc_contract`: admin-only.
+
+### Event Emission Completeness
+- `EscrowInitialized` on `initialize`.
+- `EscrowCreated` on `create_escrow` and each entry in `batch_create_escrow`.
+- `EscrowReleased` on `release_escrow`.
+- `EscrowCancelled` on `cancel_escrow`.
+- `EscrowExpired` on `expire_escrow`.
+- `DeliveryConfirmed` on `confirm_delivery`.
+- `PartialRelease` on `partial_release`.
+- `EscrowArchived` on `cleanup_escrow`.
+- `FeesWithdrawn` on `withdraw_fees`.
+- `FeeUpdated` on `update_fee`.
+- `Upgraded` on `upgrade`.
+- `Migrated` on `migrate`.
+
 ## Build
 
 ```bash

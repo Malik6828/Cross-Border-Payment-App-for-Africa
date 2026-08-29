@@ -394,11 +394,15 @@ export default function Profile() {
     }
   };
 
-  const copyAddress = () => {
-    navigator.clipboard.writeText(user?.wallet_address || '');
-    setCopied(true);
-    toast.success(t('profile.address_copied'));
-    setTimeout(() => setCopied(false), 2000);
+  const copyAddress = async () => {
+    try {
+      await navigator.clipboard.writeText(user?.wallet_address || '');
+      setCopied(true);
+      toast.success(t('profile.address_copied'));
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Failed to copy address');
+    }
   };
 
   const handleLogout = () => {
@@ -461,10 +465,14 @@ export default function Profile() {
     }
   };
 
-  const copyKey = () => {
-    navigator.clipboard.writeText(exportedKey);
-    setKeyCopied(true);
-    setTimeout(() => setKeyCopied(false), 2000);
+  const copyKey = async () => {
+    try {
+      await navigator.clipboard.writeText(exportedKey);
+      setKeyCopied(true);
+      setTimeout(() => setKeyCopied(false), 2000);
+    } catch {
+      toast.error('Failed to copy key');
+    }
   };
 
   const closeBackup = () => {
@@ -476,6 +484,11 @@ export default function Profile() {
 
   const handleCloseAccount = async (e) => {
     e.preventDefault();
+    const dest = closeDestination.trim();
+    if (!dest.startsWith('G') || dest.length !== 56 || !/^[A-Z0-9]+$/.test(dest)) {
+      toast.error('Invalid Stellar destination address. Must be a 56-character public key starting with G.');
+      return;
+    }
     if (
       !window.confirm(
         'FINAL WARNING: This will permanently close your Stellar account and transfer all XLM to the destination. This cannot be undone. Continue?'

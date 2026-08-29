@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../db');
 const { getStellarStats } = require('../services/stellar');
 const { attestKyc, revokeKyc } = require('../services/kycAttestation');
@@ -243,7 +244,11 @@ async function approveKYC(req, res, next) {
       [userId]
     );
 
-    await audit.log(req.user.userId, "kyc_approved", { target_user: userId, tx_hash: txHash });
+    await audit.auditLog(req, 'kyc_approved', {
+      type: 'user',
+      id: userId,
+      newValue: { kyc_status: 'verified', tx_hash: txHash },
+    });
 
     res.json({ message: "KYC approved", tx_hash: txHash });
   } catch (err) {
@@ -290,7 +295,12 @@ async function revokeKYC(req, res, next) {
       [userId]
     );
 
-    await audit.log(req.user.userId, "kyc_revoked", { target_user: userId, tx_hash: txHash });
+    await audit.auditLog(req, 'kyc_revoked', {
+      type: 'user',
+      id: userId,
+      oldValue: { kyc_status: 'verified' },
+      newValue: { kyc_status: 'unverified', tx_hash: txHash },
+    });
 
     res.json({ message: "KYC revoked", tx_hash: txHash });
   } catch (err) {
@@ -769,27 +779,30 @@ function validateBulkRequest(req, res) {
 async function bulkSuspend(req, res, next) {
   if (!validateBulkRequest(req, res)) return;
   const { userIds, reason } = req.body;
+  const { persistAndBroadcast } = require('../services/notificationInbox');
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const { rows: affectedUsers } = await client.query(
       `UPDATE users SET is_suspended = true, suspension_reason = $1, suspended_at = NOW()
-       WHERE id = ANY($2::uuid[]) AND is_suspended = false`,
+       WHERE id = ANY($2::uuid[]) AND is_suspended = false
+       RETURNING id`,
       [reason || null, userIds]
     );
     await client.query('COMMIT');
 
-    await audit.log(req.user.userId, 'bulk_suspend', req.ip, req.headers['user-agent'],
-      { user_count: userIds.length, reason: reason || null });
+    await audit.auditLog(req, 'user_suspension', {
+      type: 'bulk_user',
+      newValue: { user_ids: userIds, reason: reason || null },
+    });
 
-    // Queue suspension emails (fire-and-forget)
-    db.query('SELECT email, full_name FROM users WHERE id = ANY($1::uuid[])', [userIds])
-      .then(({ rows }) => rows.forEach(u =>
-        sendEmail(u.email, 'Account Suspended',
-          `Hello ${u.full_name || 'user'}, your account has been suspended. Reason: ${reason || 'Policy violation'}.`)
-          .catch(() => {})
-      ))
-      .catch(() => {});
+    // Send in-app notifications for suspended users (fire-and-forget)
+    affectedUsers.forEach(u => {
+      persistAndBroadcast(u.id, 'account_suspended', 'Account Suspended',
+        `Your account has been suspended. Reason: ${reason || 'Policy violation'}`,
+        { reason: reason || null }
+      ).catch(() => {});
+    });
 
     res.json({ message: 'Users suspended', count: userIds.length });
   } catch (err) {
@@ -803,17 +816,30 @@ async function bulkSuspend(req, res, next) {
 async function bulkUnsuspend(req, res, next) {
   if (!validateBulkRequest(req, res)) return;
   const { userIds } = req.body;
+  const { persistAndBroadcast } = require('../services/notificationInbox');
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query(
+    const { rows: affectedUsers } = await client.query(
       `UPDATE users SET is_suspended = false, suspension_reason = NULL, suspended_at = NULL
-       WHERE id = ANY($1::uuid[]) AND is_suspended = true`,
+       WHERE id = ANY($1::uuid[]) AND is_suspended = true
+       RETURNING id`,
       [userIds]
     );
     await client.query('COMMIT');
-    await audit.log(req.user.userId, 'bulk_unsuspend', req.ip, req.headers['user-agent'],
-      { user_count: userIds.length });
+    await audit.auditLog(req, 'user_unsuspend', {
+      type: 'bulk_user',
+      newValue: { user_ids: userIds },
+    });
+
+    // Send in-app notifications for unsuspended users (fire-and-forget)
+    affectedUsers.forEach(u => {
+      persistAndBroadcast(u.id, 'account_unsuspended', 'Account Reinstated',
+        'Your account suspension has been lifted. You can now use AfriPay normally.',
+        {}
+      ).catch(() => {});
+    });
+
     res.json({ message: 'Users unsuspended', count: userIds.length });
   } catch (err) {
     await client.query('ROLLBACK');
@@ -848,6 +874,33 @@ async function bulkExport(req, res, next) {
   }
 }
 
+// Exported PII is encrypted at rest and purged after this retention window (issue #881).
+const EXPORT_JOB_RETENTION_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function getExportEncryptionKey() {
+  return Buffer.from(process.env.ENCRYPTION_KEY, 'utf8').slice(0, 32);
+}
+
+function encryptExportPayload(plaintext) {
+  const key = getExportEncryptionKey();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return Buffer.concat([iv, tag, encrypted]).toString('base64');
+}
+
+function decryptExportPayload(ciphertext) {
+  const key = getExportEncryptionKey();
+  const buf = Buffer.from(ciphertext, 'base64');
+  const iv = buf.subarray(0, 12);
+  const tag = buf.subarray(12, 28);
+  const encrypted = buf.subarray(28);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8');
+}
+
 async function processBulkExportJob(jobId, userIds) {
   await db.query(`UPDATE export_jobs SET status='processing' WHERE id=$1`, [jobId]);
   const { rows } = await db.query(
@@ -856,11 +909,14 @@ async function processBulkExportJob(jobId, userIds) {
      WHERE u.id = ANY($1::uuid[])`,
     [userIds]
   );
-  // Store as JSON download URL (in production this would upload to S3)
-  const downloadUrl = `data:application/json;base64,${Buffer.from(JSON.stringify(rows)).toString('base64')}`;
+  // Encrypt the exported PII at rest; it is only ever decrypted for the owning
+  // admin, and only within the retention window (in production this would
+  // instead upload to object storage behind a signed, expiring URL).
+  const encryptedPayload = encryptExportPayload(JSON.stringify(rows));
+  const expiresAt = new Date(Date.now() + EXPORT_JOB_RETENTION_MS);
   await db.query(
-    `UPDATE export_jobs SET status='completed', download_url=$1, completed_at=NOW() WHERE id=$2`,
-    [downloadUrl, jobId]
+    `UPDATE export_jobs SET status='completed', download_url=$1, expires_at=$2, completed_at=NOW() WHERE id=$3`,
+    [encryptedPayload, expiresAt, jobId]
   );
 }
 
@@ -868,11 +924,40 @@ async function getJobStatus(req, res, next) {
   try {
     const { jobId } = req.params;
     const { rows } = await db.query(
-      `SELECT id, status, operation, download_url, error, created_at, completed_at FROM export_jobs WHERE id=$1`,
+      `SELECT id, admin_id, status, operation, download_url, expires_at, error, created_at, completed_at
+       FROM export_jobs WHERE id=$1`,
       [jobId]
     );
-    if (!rows[0]) return res.status(404).json({ error: 'Job not found' });
-    res.json(rows[0]);
+    const job = rows[0];
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    if (job.admin_id !== req.user.userId) {
+      return res.status(403).json({ error: 'Only the admin who created this export job may access it' });
+    }
+
+    const isExpired = job.expires_at && new Date(job.expires_at) <= new Date();
+    if (isExpired && job.download_url) {
+      // Lazily purge the encrypted payload once the retention window has elapsed
+      await db.query(`UPDATE export_jobs SET download_url=NULL WHERE id=$1`, [jobId]);
+      job.download_url = null;
+    }
+
+    let downloadUrl = null;
+    if (job.download_url && job.status === 'completed' && !isExpired) {
+      const plaintext = decryptExportPayload(job.download_url);
+      downloadUrl = `data:application/json;base64,${Buffer.from(plaintext).toString('base64')}`;
+    }
+
+    res.json({
+      id: job.id,
+      status: isExpired ? 'expired' : job.status,
+      operation: job.operation,
+      download_url: downloadUrl,
+      error: job.error,
+      created_at: job.created_at,
+      completed_at: job.completed_at,
+      expires_at: job.expires_at,
+    });
   } catch (err) {
     next(err);
   }
@@ -887,15 +972,62 @@ async function bulkKycUpdate(req, res, next) {
   const kycStatus = status === 'approved' ? 'verified' : 'rejected';
   const client = await db.pool.connect();
   try {
+    // Fetch users with wallets and current kyc_status before updating
+    const { rows: users } = await client.query(
+      `SELECT u.id, u.kyc_status, u.kyc_data, w.public_key
+       FROM users u LEFT JOIN wallets w ON w.user_id = u.id
+       WHERE u.id = ANY($1::uuid[])`,
+      [userIds]
+    );
+
     await client.query('BEGIN');
     await client.query(
       `UPDATE users SET kyc_status = $1, updated_at = NOW() WHERE id = ANY($2::uuid[])`,
       [kycStatus, userIds]
     );
     await client.query('COMMIT');
+
+    // Get admin wallet for on-chain operations
+    const adminWallet = await db.query(
+      "SELECT public_key FROM wallets WHERE user_id = $1",
+      [req.user.userId]
+    );
+    const adminPublicKey = adminWallet.rows[0]?.public_key;
+
+    const attestationResults = [];
+
+    for (const user of users) {
+      let txHash = null;
+      let attestationError = null;
+
+      if (status === 'approved') {
+        const idType = user.kyc_data?.id_type || 'unknown';
+        try {
+          txHash = await attestKyc(adminPublicKey, user.public_key, user.id, idType);
+        } catch (err) {
+          attestationError = err.message;
+          console.error(`On-chain attestation failed for user ${user.id}:`, err.message);
+        }
+      } else if (status === 'rejected' && user.kyc_status === 'verified') {
+        try {
+          txHash = await revokeKyc(adminPublicKey, user.public_key);
+        } catch (err) {
+          attestationError = err.message;
+          console.error(`On-chain revocation failed for user ${user.id}:`, err.message);
+        }
+      }
+
+      attestationResults.push({
+        user_id: user.id,
+        onchain_tx_hash: txHash,
+        onchain_success: !attestationError,
+        onchain_error: attestationError,
+      });
+    }
+
     await audit.log(req.user.userId, 'bulk_kyc_update', req.ip, req.headers['user-agent'],
-      { user_count: userIds.length, status: kycStatus, reason: reason || null });
-    res.json({ message: 'KYC status updated', count: userIds.length, status: kycStatus });
+      { user_count: userIds.length, status: kycStatus, reason: reason || null, attestation_results: attestationResults });
+    res.json({ message: 'KYC status updated', count: userIds.length, status: kycStatus, attestation_results: attestationResults });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -904,11 +1036,72 @@ async function bulkKycUpdate(req, res, next) {
   }
 }
 
+/**
+ * GET /api/admin/audit-logs
+ * Cursor-based paginated audit log viewer.
+ * Supports filtering by actor, action, resource_type, and date range.
+ */
+async function getAuditLogs(req, res, next) {
+  try {
+    const { actor, action, resource_type, from, to, cursor } = req.query;
+    const limit = Math.min(100, parseInt(req.query.limit, 10) || 20);
+
+    const conditions = [];
+    const params = [];
+
+    if (actor) {
+      params.push(actor);
+      conditions.push(`user_id = $${params.length}`);
+    }
+    if (action) {
+      params.push(action);
+      conditions.push(`action = $${params.length}`);
+    }
+    if (resource_type) {
+      params.push(resource_type);
+      conditions.push(`resource_type = $${params.length}`);
+    }
+    if (from) {
+      params.push(from);
+      conditions.push(`created_at >= $${params.length}`);
+    }
+    if (to) {
+      params.push(to);
+      conditions.push(`created_at <= $${params.length}`);
+    }
+    if (cursor) {
+      params.push(cursor);
+      conditions.push(`created_at < $${params.length}`);
+    }
+
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    params.push(limit + 1);
+
+    const { rows } = await db.query(
+      `SELECT id, user_id AS actor_id, actor_role, action, resource_type, resource_id,
+              old_value, new_value, ip_address, user_agent, created_at
+       FROM audit_logs ${where}
+       ORDER BY created_at DESC
+       LIMIT $${params.length}`,
+      params
+    );
+
+    const hasMore = rows.length > limit;
+    const data = hasMore ? rows.slice(0, limit) : rows;
+    const nextCursor = hasMore ? data[data.length - 1].created_at.toISOString() : null;
+
+    res.json({ data, next_cursor: nextCursor, has_more: hasMore });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getStats,
   getUsers,
   getTransactions,
   getDailyTransactionStats,
+  getStellarNetworkStats,
   clawback,
   approveKYC,
   revokeKYC,
@@ -929,4 +1122,6 @@ module.exports = {
   bulkExport,
   getJobStatus,
   bulkKycUpdate,
+  // #698
+  getAuditLogs,
 };

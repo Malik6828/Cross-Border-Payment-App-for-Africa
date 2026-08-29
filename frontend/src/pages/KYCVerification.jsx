@@ -21,93 +21,11 @@ const STEPS = [
   { id: 2, label: "Document Upload",  shortLabel: "2", Icon: FileText },
   { id: 3, label: "Selfie Capture",   shortLabel: "3", Icon: Camera },
   { id: 4, label: "Review & Submit",  shortLabel: "4", Icon: ClipboardCheck },
-// Issue #644: KYC flow stages shown in the step indicator.
-const KYC_STEPS = [
-  { key: "personal", label: "Personal Info", icon: User },
-  { key: "document", label: "Document Upload", icon: FileText },
-  { key: "selfie", label: "Selfie Capture", icon: Camera },
-  { key: "review", label: "Review & Submit", icon: ClipboardCheck },
-];
-const KYC_STEP_STORAGE_KEY = "afripay_kyc_step";
-
-function KYCStepIndicator({ currentStep, onStepClick }) {
-  return (
-    <nav aria-label="KYC verification progress">
-      <ol className="flex items-center">
-        {KYC_STEPS.map((step, index) => {
-          const isCompleted = index < currentStep;
-          const isCurrent = index === currentStep;
-          const StepIcon = step.icon;
-          const isLast = index === KYC_STEPS.length - 1;
-          return (
-            <li key={step.key} className={`flex items-center ${isLast ? "" : "flex-1"}`}>
-              <button
-                type="button"
-                onClick={() => isCompleted && onStepClick(index)}
-                disabled={!isCompleted}
-                aria-current={isCurrent ? "step" : undefined}
-                aria-label={`Step ${index + 1} of ${KYC_STEPS.length}: ${step.label}`}
-                className={`flex flex-col items-center gap-1 rounded-lg p-1 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
-                  isCompleted ? "cursor-pointer" : "cursor-default"
-                }`}
-              >
-                <span
-                  className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 transition-colors ${
-                    isCurrent
-                      ? "bg-primary-500 text-white ring-4 ring-primary-500/20"
-                      : isCompleted
-                        ? "bg-primary-500 text-white"
-                        : "bg-gray-800 border border-gray-700 text-gray-500"
-                  }`}
-                >
-                  {isCompleted ? <Check size={16} /> : <StepIcon size={16} />}
-                </span>
-                <span
-                  className={`hidden sm:block text-xs text-center ${
-                    isCurrent
-                      ? "font-bold text-white"
-                      : isCompleted
-                        ? "text-gray-300"
-                        : "text-gray-500"
-                  }`}
-                >
-                  {step.label}
-                </span>
-                <span
-                  className={`sm:hidden text-[10px] ${
-                    isCurrent ? "font-bold text-white" : "text-gray-500"
-                  }`}
-                >
-                  {index + 1}
-                </span>
-              </button>
-              {!isLast && (
-                <span
-                  aria-hidden="true"
-                  className={`h-0.5 flex-1 mx-1 ${
-                    index < currentStep ? "bg-primary-500" : "bg-gray-700"
-                  }`}
-                />
-              )}
-            </li>
-          );
-        })}
-      </ol>
-    </nav>
-  );
-}
-
-const ID_TYPES = [
-  { value: "national_id", label: "National ID Card" },
-  { value: "passport", label: "International Passport" },
-  { value: "drivers_license", label: "Driver's License" },
-  { value: "voters_card", label: "Voter's Card" },
 ];
 
 const SESSION_KEY = "afripay_kyc_step";
 
-// ── Step indicator ────────────────────────────────────────────────────────────
-function KYCStepIndicator({ currentStep, completedSteps, onStepClick }) {
+function KYCStepIndicator({ currentStep, completedSteps = [], onStepClick }) {
   return (
     <nav
       aria-label="KYC verification progress"
@@ -249,16 +167,6 @@ export default function KYCVerification() {
     sessionStorage.setItem(`${SESSION_KEY}_completed`, JSON.stringify(completed));
   };
 
-  // Issue #644: current KYC step, persisted across refreshes in sessionStorage.
-  const [currentStep, setCurrentStep] = useState(() => {
-    const saved = parseInt(sessionStorage.getItem(KYC_STEP_STORAGE_KEY), 10);
-    return Number.isInteger(saved) && saved >= 0 && saved < KYC_STEPS.length ? saved : 0;
-  });
-
-  useEffect(() => {
-    sessionStorage.setItem(KYC_STEP_STORAGE_KEY, String(currentStep));
-  }, [currentStep]);
-
   useEffect(() => {
     api
       .get("/kyc/status")
@@ -322,8 +230,6 @@ export default function KYCVerification() {
           Required for regulatory compliance in African markets.
         </p>
       </div>
-
-      <KYCStepIndicator currentStep={currentStep} onStepClick={setCurrentStep} />
 
       {loading ? (
         <div className="flex justify-center py-12" role="status" aria-label="Loading">

@@ -122,7 +122,9 @@ export default function PINVerificationModal({ isOpen, onClose, onSuccess, amoun
               {recipient && (
                 <div className="flex justify-between items-center">
                   <span className="text-gray-400 text-sm">{t('send.confirm_to')}</span>
-                  <span className="text-gray-300 text-xs font-mono">{recipient.slice(0, 16)}...</span>
+                  <span className="text-gray-300 text-xs font-mono">
+                    {recipient.length > 16 ? `${recipient.slice(0, 16)}…` : recipient}
+                  </span>
                 </div>
               )}
             </div>

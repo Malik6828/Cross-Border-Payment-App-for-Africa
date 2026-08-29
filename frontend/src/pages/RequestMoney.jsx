@@ -44,23 +44,35 @@ export default function RequestMoney() {
     }
   };
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(paymentLink);
-    setCopied(true);
-    toast.success(t('common.copied'));
-    setTimeout(() => setCopied(false), 2000);
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(paymentLink);
+      setCopied(true);
+      toast.success(t('common.copied'));
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Failed to copy link');
+    }
   };
 
-  const copyDeepLink = () => {
-    navigator.clipboard.writeText(paymentLink);
-    setCopiedDeep(true);
-    toast.success('Deep link copied');
-    setTimeout(() => setCopiedDeep(false), 2000);
+  const copyDeepLink = async () => {
+    try {
+      await navigator.clipboard.writeText(paymentLink);
+      setCopiedDeep(true);
+      toast.success('Deep link copied');
+      setTimeout(() => setCopiedDeep(false), 2000);
+    } catch {
+      toast.error('Failed to copy deep link');
+    }
   };
 
   const shareLink = async () => {
     if (navigator.share) {
-      await navigator.share({ title: 'Payment Request', text: paymentLink });
+      try {
+        await navigator.share({ title: 'Payment Request', text: paymentLink });
+      } catch {
+        // user cancelled or share failed — fall back to copy
+      }
     } else {
       copyLink();
     }

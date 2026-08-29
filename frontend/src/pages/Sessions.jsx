@@ -151,7 +151,6 @@ export default function Sessions() {
           ))}
         </div>
       )}
-    </div>
 
       {trustedDevice && (
         <div className="mt-6">

@@ -4,6 +4,7 @@ import { ArrowLeft, CheckCircle2, Download, FileUp, Loader2, Plus, RotateCcw, Se
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { CURRENCIES, truncateAddress } from '../utils/currency';
+import { validateStellarAddress } from '../utils/validation';
 
 const SINGLE_TRANSFER_LIMIT = 10000;
 
@@ -39,28 +40,6 @@ function splitCsvLine(line) {
 
   values.push(current.trim());
   return values;
-}
-
-function validateStellarAddress(address) {
-  if (!address || typeof address !== 'string') {
-    return 'Address is required';
-  }
-  
-  const trimmed = address.trim();
-  
-  if (!trimmed.startsWith('G')) {
-    return 'Invalid Stellar address (must start with G)';
-  }
-  
-  if (trimmed.length !== 56) {
-    return `Invalid Stellar address (must be 56 characters, got ${trimmed.length})`;
-  }
-  
-  if (!/^[A-Z0-9]+$/.test(trimmed)) {
-    return 'Invalid Stellar address (contains invalid characters)';
-  }
-  
-  return null;
 }
 
 function validateAmount(amount) {

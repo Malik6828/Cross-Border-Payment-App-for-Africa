@@ -2,7 +2,7 @@
 
 use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Bytes, Env};
 
-use crate::{KycAttestationContract, KycAttestationContractClient};
+use crate::{KycAttestationContract, KycAttestationContractClient, KycTier};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -36,9 +36,9 @@ fn test_double_initialize_panics() {
 fn test_attest_stores_record() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
 
-    let record = client.get_attestation(&user);
+    let record = client.get_attestation(&user, KycTier::Basic);
     assert_eq!(record.revoked_at, 0);
     assert!(record.attested_at > 0);
 }
@@ -47,8 +47,8 @@ fn test_attest_stores_record() {
 fn test_attest_makes_user_verified() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
-    assert!(client.is_verified(&user));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    assert!(client.is_verified(&user, KycTier::Basic));
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn test_attest_non_admin_panics() {
     let (env, client, _) = setup();
     let impostor = Address::generate(&env);
     let user = Address::generate(&env);
-    client.attest(&impostor, &user, &hash(&env));
+    client.attest(&impostor, &user, KycTier::Basic, &hash(&env), 0);
 }
 
 #[test]
@@ -65,7 +65,7 @@ fn test_attest_non_admin_panics() {
 fn test_attest_empty_hash_panics() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &Bytes::new(&env));
+    client.attest(&admin, &user, KycTier::Basic, &Bytes::new(&env), 0);
 }
 
 #[test]
@@ -73,21 +73,21 @@ fn test_attest_empty_hash_panics() {
 fn test_attest_duplicate_active_panics() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
-    client.attest(&admin, &user, &hash(&env));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
 }
 
 #[test]
 fn test_attest_after_revoke_succeeds() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
     env.ledger().with_mut(|li| li.timestamp += 1);
-    client.revoke(&admin, &user);
+    client.revoke(&admin, &user, KycTier::Basic);
     // Re-attest after revocation should succeed
     env.ledger().with_mut(|li| li.timestamp += 1);
-    client.attest(&admin, &user, &hash(&env));
-    assert!(client.is_verified(&user));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    assert!(client.is_verified(&user, KycTier::Basic));
 }
 
 // ── revoke ────────────────────────────────────────────────────────────────────
@@ -96,11 +96,11 @@ fn test_attest_after_revoke_succeeds() {
 fn test_revoke_sets_revoked_at() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
     env.ledger().with_mut(|li| li.timestamp += 100);
-    client.revoke(&admin, &user);
+    client.revoke(&admin, &user, KycTier::Basic);
 
-    let record = client.get_attestation(&user);
+    let record = client.get_attestation(&user, KycTier::Basic);
     assert!(record.revoked_at > 0);
 }
 
@@ -108,9 +108,9 @@ fn test_revoke_sets_revoked_at() {
 fn test_revoke_makes_user_unverified() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
-    client.revoke(&admin, &user);
-    assert!(!client.is_verified(&user));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    client.revoke(&admin, &user, KycTier::Basic);
+    assert!(!client.is_verified(&user, KycTier::Basic));
 }
 
 #[test]
@@ -119,16 +119,16 @@ fn test_revoke_non_admin_panics() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
     let impostor = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
-    client.revoke(&impostor, &user);
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    client.revoke(&impostor, &user, KycTier::Basic);
 }
 
 #[test]
-#[should_panic(expected = "no attestation found for user")]
+#[should_panic(expected = "no attestation found for user and tier")]
 fn test_revoke_nonexistent_panics() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.revoke(&admin, &user);
+    client.revoke(&admin, &user, KycTier::Basic);
 }
 
 #[test]
@@ -136,9 +136,9 @@ fn test_revoke_nonexistent_panics() {
 fn test_revoke_twice_panics() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
-    client.revoke(&admin, &user);
-    client.revoke(&admin, &user);
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    client.revoke(&admin, &user, KycTier::Basic);
+    client.revoke(&admin, &user, KycTier::Basic);
 }
 
 // ── is_verified ───────────────────────────────────────────────────────────────
@@ -147,24 +147,24 @@ fn test_revoke_twice_panics() {
 fn test_is_verified_false_for_unknown_user() {
     let (env, client, _) = setup();
     let user = Address::generate(&env);
-    assert!(!client.is_verified(&user));
+    assert!(!client.is_verified(&user, KycTier::Basic));
 }
 
 #[test]
 fn test_is_verified_true_after_attest() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
-    assert!(client.is_verified(&user));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    assert!(client.is_verified(&user, KycTier::Basic));
 }
 
 #[test]
 fn test_is_verified_false_after_revoke() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
-    client.attest(&admin, &user, &hash(&env));
-    client.revoke(&admin, &user);
-    assert!(!client.is_verified(&user));
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    client.revoke(&admin, &user, KycTier::Basic);
+    assert!(!client.is_verified(&user, KycTier::Basic));
 }
 
 #[test]
@@ -172,18 +172,18 @@ fn test_multiple_users_independent() {
     let (env, client, admin) = setup();
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
-    client.attest(&admin, &user1, &hash(&env));
-    assert!(client.is_verified(&user1));
-    assert!(!client.is_verified(&user2));
+    client.attest(&admin, &user1, KycTier::Basic, &hash(&env), 0);
+    assert!(client.is_verified(&user1, KycTier::Basic));
+    assert!(!client.is_verified(&user2, KycTier::Basic));
 }
 
 // ── get_attestation ───────────────────────────────────────────────────────────
 
 #[test]
-#[should_panic(expected = "no attestation found for user")]
+#[should_panic(expected = "no attestation found for user and tier")]
 fn test_get_attestation_nonexistent_panics() {
     let (env, client, _) = setup();
-    client.get_attestation(&Address::generate(&env));
+    client.get_attestation(&Address::generate(&env), KycTier::Basic);
 }
 
 #[test]
@@ -191,6 +191,103 @@ fn test_get_attestation_hash_matches() {
     let (env, client, admin) = setup();
     let user = Address::generate(&env);
     let h = hash(&env);
-    client.attest(&admin, &user, &h);
-    assert_eq!(client.get_attestation(&user).kyc_hash, h);
+    client.attest(&admin, &user, KycTier::Basic, &h, 0);
+    assert_eq!(client.get_attestation(&user, KycTier::Basic).kyc_hash, h);
+}
+
+#[test]
+fn test_attest_all_tiers_and_verify_independently() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    client.attest(&admin, &user, KycTier::Enhanced, &hash(&env), 0);
+    client.attest(&admin, &user, KycTier::Business, &hash(&env), 0);
+
+    assert!(client.is_verified(&user, KycTier::Basic));
+    assert!(client.is_verified(&user, KycTier::Enhanced));
+    assert!(client.is_verified(&user, KycTier::Business));
+}
+
+#[test]
+fn test_revoke_one_tier_leaves_others_verified() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    client.attest(&admin, &user, KycTier::Enhanced, &hash(&env), 0);
+    client.attest(&admin, &user, KycTier::Business, &hash(&env), 0);
+
+    client.revoke(&admin, &user, KycTier::Enhanced);
+
+    assert!(client.is_verified(&user, KycTier::Basic));
+    assert!(!client.is_verified(&user, KycTier::Enhanced));
+    assert!(client.is_verified(&user, KycTier::Business));
+}
+
+#[test]
+fn test_get_highest_tier_returns_correct_tier() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+
+    assert_eq!(client.get_highest_tier(&user), None);
+
+    client.attest(&admin, &user, KycTier::Basic, &hash(&env), 0);
+    assert_eq!(client.get_highest_tier(&user), Some(KycTier::Basic));
+
+    client.attest(&admin, &user, KycTier::Enhanced, &hash(&env), 0);
+    assert_eq!(client.get_highest_tier(&user), Some(KycTier::Enhanced));
+
+    client.attest(&admin, &user, KycTier::Business, &hash(&env), 0);
+    assert_eq!(client.get_highest_tier(&user), Some(KycTier::Business));
+
+    client.revoke(&admin, &user, KycTier::Business);
+    assert_eq!(client.get_highest_tier(&user), Some(KycTier::Enhanced));
+}
+
+#[test]
+fn test_batch_revoke_revokes_valid_pairs() {
+    let (env, client, admin) = setup();
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+
+    client.attest(&admin, &user1, &hash(&env));
+    client.attest(&admin, &user2, &hash(&env));
+
+    let mut revocations = soroban_sdk::Vec::new(&env);
+    revocations.push_back((user1.clone(), KycTier::Standard));
+    revocations.push_back((user2.clone(), KycTier::Basic));
+
+    client.batch_revoke(&admin, &revocations);
+
+    assert!(!client.is_verified(&user1));
+    assert!(!client.is_verified(&user2));
+}
+
+#[test]
+fn test_batch_revoke_skips_missing_attestations() {
+    let (env, client, admin) = setup();
+    let user = Address::generate(&env);
+    client.attest(&admin, &user, &hash(&env));
+
+    let mut revocations = soroban_sdk::Vec::new(&env);
+    revocations.push_back((user.clone(), KycTier::Standard));
+    revocations.push_back((Address::generate(&env), KycTier::Premium));
+
+    client.batch_revoke(&admin, &revocations);
+
+    assert!(!client.is_verified(&user));
+}
+
+#[test]
+#[should_panic(expected = "Batch size exceeds maximum of 50")]
+fn test_batch_revoke_exceeds_limit_panics() {
+    let (env, client, admin) = setup();
+    let mut revocations = soroban_sdk::Vec::new(&env);
+
+    for _ in 0..51 {
+        revocations.push_back((Address::generate(&env), KycTier::Basic));
+    }
+
+    client.batch_revoke(&admin, &revocations);
 }

@@ -1,5 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
+const { verifyIncomingPayment } = require('../services/stellar');
 
 async function create(req, res, next) {
   try {
@@ -74,7 +75,8 @@ async function markClaimed(req, res, next) {
     const userId = req.user.userId;
 
     const result = await db.query(
-      `SELECT requester_id, claimed FROM payment_requests WHERE id = $1 AND expires_at > NOW()`,
+      `SELECT requester_id, requester_wallet, amount, asset, claimed
+       FROM payment_requests WHERE id = $1 AND expires_at > NOW()`,
       [id]
     );
 
@@ -82,12 +84,25 @@ async function markClaimed(req, res, next) {
       return res.status(404).json({ error: 'Payment request not found or expired' });
     }
 
-    if (result.rows[0].requester_id !== userId) {
+    const paymentRequest = result.rows[0];
+
+    if (paymentRequest.requester_id !== userId) {
       return res.status(403).json({ error: 'Only the intended recipient can claim this payment request' });
     }
 
-    if (result.rows[0].claimed) {
+    if (paymentRequest.claimed) {
       return res.status(409).json({ error: 'Payment request already claimed' });
+    }
+
+    const verification = await verifyIncomingPayment({
+      txHash,
+      destination: paymentRequest.requester_wallet,
+      asset: paymentRequest.asset,
+      minAmount: paymentRequest.amount,
+    });
+
+    if (!verification.verified) {
+      return res.status(422).json({ error: verification.reason || 'Unable to verify transaction' });
     }
 
     await db.query(

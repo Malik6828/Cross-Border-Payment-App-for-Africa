@@ -51,27 +51,76 @@ async function resolveWallet(userId, walletId) {
   return result.rows[0] || null;
 }
 
+// Balance cache TTL for multi-asset endpoint: 10 seconds per spec
+const MULTI_ASSET_TTL = 10;
+
+async function fetchSupportedAssets() {
+  const { rows } = await db.query(
+    `SELECT asset_code, asset_issuer, display_name, icon_url, decimal_precision
+     FROM supported_assets WHERE is_active = true`
+  );
+  const map = new Map();
+  for (const row of rows) {
+    const key = row.asset_issuer
+      ? `${row.asset_code}:${row.asset_issuer}`
+      : row.asset_code;
+    map.set(key, row);
+  }
+  return map;
+}
+
 // ---------------------------------------------------------------------------
-// GET /wallet/balance  (optionally ?wallet_id=<uuid>)
+// GET /wallet/balance  (optionally ?wallet_id=<uuid>, ?refresh=true)
+// Returns all asset balances with whitelist metadata and XLM reserve info.
 // ---------------------------------------------------------------------------
 async function getWallet(req, res, next) {
   try {
     const walletId = req.query.wallet_id || null;
+    const forceRefresh = req.query.refresh === 'true';
     const wallet = await resolveWallet(req.user.userId, walletId);
     if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
 
     const { public_key } = wallet;
     const cacheKey = `balance:${public_key}`;
 
-    const cached = await cache.get(cacheKey);
-    if (cached) {
-      return res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, ...cached, cached: true });
+    if (!forceRefresh) {
+      const cached = await cache.get(cacheKey);
+      if (cached) {
+        return res.json({
+          id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default,
+          ...cached,
+          cached: true,
+        });
+      }
     }
 
-    const balanceData = await getBalance(public_key);
-    await cache.set(cacheKey, balanceData, cache.BALANCE_TTL);
+    const [horizonData, assetMap] = await Promise.all([
+      getBalance(public_key),
+      fetchSupportedAssets(),
+    ]);
 
-    res.json({ id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default, ...balanceData, cached: false });
+    const enrichedBalances = horizonData.balances.map(b => {
+      const key = b.asset_issuer
+        ? `${b.asset_code}:${b.asset_issuer}`
+        : b.asset_code;
+      const meta = assetMap.get(key);
+      return {
+        ...b,
+        display_name: meta?.display_name || b.asset_code,
+        icon_url: meta?.icon_url || null,
+        decimal_precision: meta?.decimal_precision ?? 7,
+        is_whitelisted: !!meta,
+      };
+    });
+
+    const balanceData = { ...horizonData, balances: enrichedBalances };
+    await cache.set(cacheKey, balanceData, MULTI_ASSET_TTL);
+
+    res.json({
+      id: wallet.id, public_key, label: wallet.label, is_default: wallet.is_default,
+      ...balanceData,
+      cached: false,
+    });
   } catch (err) {
     next(err);
   }
@@ -349,8 +398,25 @@ async function listTrustlines(req, res, next) {
 async function addTrustlineHandler(req, res, next) {
   try {
     const { asset, asset_issuer, limit, wallet_id } = req.body;
+
+    // Validate asset against the supported_assets whitelist
+    const assetCheck = await db.query(
+      `SELECT id FROM supported_assets
+       WHERE asset_code = $1
+         AND (asset_issuer = $2 OR ($2 IS NULL AND asset_issuer IS NULL))
+         AND is_active = true`,
+      [asset, asset_issuer || null]
+    );
+    if (!assetCheck.rows[0]) {
+      return res.status(400).json({
+        error: `Asset ${asset} is not on the supported assets whitelist. Contact support to request it.`,
+        code: 'ASSET_NOT_WHITELISTED',
+      });
+    }
+
     const wallet = await resolveWallet(req.user.userId, wallet_id || null);
     if (!wallet) return res.status(404).json({ error: 'Wallet not found' });
+
     const { transactionHash } = await addTrustline({
       publicKey: wallet.public_key,
       encryptedSecretKey: wallet.encrypted_secret_key,
