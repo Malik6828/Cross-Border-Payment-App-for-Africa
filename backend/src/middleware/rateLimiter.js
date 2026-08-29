@@ -2,6 +2,7 @@ const rateLimit = require('express-rate-limit');
 const Redis = require('ioredis');
 const logger = require('../utils/logger');
 const audit = require('../services/audit');
+const metrics = require('../utils/metrics');
 
 // Redis client for rate limiting (shared instance)
 let redisClient = null;
@@ -18,6 +19,60 @@ function getRedis() {
   return redisClient;
 }
 
+// Tracks, per limiter prefix, whether the store is currently degraded to the
+// express-rate-limit in-memory fallback — and when it started / was last
+// logged, so we warn once on the transition and periodically thereafter
+// instead of on every request.
+const DEGRADED_LOG_INTERVAL_MS = 5 * 60 * 1000;
+const degradedState = new Map(); // prefix -> { since, lastLoggedAt, reason }
+
+function markDegraded(prefix, reason) {
+  const now = Date.now();
+  const state = degradedState.get(prefix);
+  metrics.rateLimiterRedisFailuresTotal.inc({ prefix, reason });
+
+  if (!state) {
+    degradedState.set(prefix, { since: now, lastLoggedAt: now, reason });
+    metrics.rateLimiterDegraded.set({ prefix }, 1);
+    logger.warn('Rate limiter degraded: falling back to per-process in-memory limiting', {
+      prefix,
+      reason,
+    });
+    return;
+  }
+
+  if (now - state.lastLoggedAt >= DEGRADED_LOG_INTERVAL_MS) {
+    state.lastLoggedAt = now;
+    logger.warn('Rate limiter still degraded: per-process in-memory limiting remains active', {
+      prefix,
+      reason,
+      degradedForMs: now - state.since,
+    });
+  }
+}
+
+function markHealthy(prefix) {
+  metrics.rateLimiterDegraded.set({ prefix }, 0);
+  if (degradedState.has(prefix)) {
+    const state = degradedState.get(prefix);
+    degradedState.delete(prefix);
+    logger.warn('Rate limiter recovered: shared Redis store is available again', {
+      prefix,
+      degradedForMs: Date.now() - state.since,
+    });
+  }
+}
+
+// Reports 'redis' or 'memory-fallback' per limiter prefix, for the health-check surface.
+function getRateLimiterStatus() {
+  return {
+    auth: degradedState.has('auth') ? 'memory-fallback' : 'redis',
+    payment: degradedState.has('payment') ? 'memory-fallback' : 'redis',
+    read: degradedState.has('read') ? 'memory-fallback' : 'redis',
+    admin: degradedState.has('admin') ? 'memory-fallback' : 'redis',
+  };
+}
+
 // express-rate-limit v7 custom store backed by ioredis
 class RedisStore {
   constructor(windowMs, prefix) {
@@ -29,7 +84,8 @@ class RedisStore {
     const redis = getRedis();
     const storeKey = `rl:${this.prefix}:${key}`;
     if (!redis) {
-      // No Redis — fall back to in-memory (handled by express-rate-limit default)
+      // No Redis configured — fall back to in-memory (handled by express-rate-limit default)
+      markDegraded(this.prefix, 'no_redis_configured');
       return null;
     }
     try {
@@ -41,8 +97,10 @@ class RedisStore {
         await redis.expire(storeKey, this.windowSec);
       }
       const resetTime = new Date(Date.now() + (ttl > 0 ? ttl : this.windowSec) * 1000);
+      markHealthy(this.prefix);
       return { totalHits, resetTime };
-    } catch {
+    } catch (err) {
+      markDegraded(this.prefix, 'redis_error');
       return null; // Redis error — fail open
     }
   }
@@ -188,4 +246,11 @@ function attachHeaders(limiter) {
   };
 }
 
-module.exports = { authLimiter, paymentLimiter, readLimiter, adminLimiter };
+module.exports = {
+  authLimiter,
+  paymentLimiter,
+  readLimiter,
+  adminLimiter,
+  RedisStore,
+  getRateLimiterStatus,
+};

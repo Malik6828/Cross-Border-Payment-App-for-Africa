@@ -3,6 +3,7 @@ const { withTimeout } = require('../utils/withTimeout');
 const stellar = require('./stellar');
 const { getClient: getRedisClient } = require('../utils/cache');
 const logger = require('../utils/logger');
+const { getRateLimiterStatus } = require('../middleware/rateLimiter');
 
 const horizonUrl = process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
 
@@ -72,6 +73,14 @@ function checkLedgerListener() {
   };
 }
 
+// Reports whether each rate limiter is on its shared Redis store or has
+// fallen back to per-process in-memory limiting (see issue #952 / BE-005).
+function checkRateLimiter() {
+  const backends = getRateLimiterStatus();
+  const degraded = Object.values(backends).some((backend) => backend !== 'redis');
+  return { status: degraded ? 'degraded' : 'healthy', backends };
+}
+
 async function checkShallowDatabase() {
   try {
     await withTimeout(db.query('SELECT 1'));
@@ -118,9 +127,13 @@ async function runDeepHealthChecks() {
     checkRedis(),
   ]);
   const ledger_listener = checkLedgerListener();
+  const rate_limiter = checkRateLimiter();
 
   const criticalFailed = database.status === 'unhealthy' || redis.status === 'unhealthy';
-  const nonCriticalFailed = horizon.status === 'unhealthy' || ledger_listener.status === 'degraded';
+  const nonCriticalFailed =
+    horizon.status === 'unhealthy' ||
+    ledger_listener.status === 'degraded' ||
+    rate_limiter.status === 'degraded';
 
   let status;
   if (criticalFailed) status = 'unhealthy';
@@ -129,7 +142,7 @@ async function runDeepHealthChecks() {
 
   return {
     status,
-    components: { database, horizon, redis, ledger_listener },
+    components: { database, horizon, redis, ledger_listener, rate_limiter },
     timestamp: new Date().toISOString(),
     version: process.env.npm_package_version || '1.0.0',
   };

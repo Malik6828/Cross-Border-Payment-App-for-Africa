@@ -170,6 +170,9 @@ router.post(
 );
 
 // Multisig / business account routes
+// NOTE: register each (method, path) pair exactly once in this file — Express uses the
+// first matching registration, so a later duplicate is silently dead code. See
+// scripts/check-duplicate-routes.js (run in CI) which fails the build on any new duplicate.
 router.post(
   '/upgrade-business',
   [body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID')],
@@ -177,7 +180,6 @@ router.post(
   upgradeToBusinessAccount,
 );
 router.get('/signers', listSigners);
-router.post('/upgrade-business', upgradeToBusinessAccount);
 router.get('/signers', isAdminOrOwner(), listSigners);
 router.get('/signers/horizon', getSignersFromHorizon);
 router.post('/clear-inflation-destination', clearInflationDestinationHandler);
