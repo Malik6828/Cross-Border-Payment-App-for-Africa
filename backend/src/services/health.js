@@ -1,6 +1,7 @@
 const db = require('../db');
 const { withTimeout } = require('../utils/withTimeout');
 const stellar = require('./stellar');
+const { getAnchorHealth } = require('./anchor');
 
 async function checkDatabase() {
   try {
@@ -22,6 +23,7 @@ async function runHealthChecks() {
 
   const ok = dbOk && stellarOk;
   const poolStats = db.getPoolStats();
+  const anchor = getAnchorHealth();
 
   return {
     status: ok ? 'ok' : 'degraded',
@@ -32,6 +34,10 @@ async function runHealthChecks() {
       total: poolStats.total,
       idle: poolStats.idle,
       waiting: poolStats.waiting,
+    },
+    anchor: {
+      status: anchor.circuitOpen ? 'down' : 'ok',
+      consecutiveFailures: anchor.consecutiveFailures,
     },
   };
 }

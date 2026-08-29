@@ -3,6 +3,7 @@ const multer = require("multer");
 const { body, validationResult } = require("express-validator");
 const authMiddleware = require("../middleware/auth");
 const kycUpload = require("../middleware/kycUpload");
+const scanUpload = require("../middleware/scanUpload");
 const { submitKYC, getKYCStatus } = require("../controllers/kycController");
 
 const validate = (req, res, next) => {
@@ -29,6 +30,7 @@ router.get("/status", getKYCStatus);
 router.post(
   "/submit",
   upload,
+  scanUpload,
   [
     body("id_type").notEmpty().withMessage("ID type is required"),
     body("id_number").notEmpty().withMessage("ID number is required"),

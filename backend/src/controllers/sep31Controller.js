@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
 const cache = require('../utils/cache');
 const logger = require('../utils/logger');
+const { validateCallbackUrl, deliverCallback } = require('../services/sep31CallbackService');
 
 const ANCHOR_INFO_TTL = 5 * 60; // 5 minutes in seconds
 const anchorUrl = process.env.ANCHOR_URL || 'https://testanchor.stellar.org';
@@ -62,11 +63,18 @@ async function getInfo(req, res, next) {
 
 async function createTransaction(req, res, next) {
   try {
-    const { amount, asset_code = 'USDC', receiver_account, fields = {}, sender_name, sender_email } = req.body;
+    const { amount, asset_code = 'USDC', receiver_account, fields = {}, sender_name, sender_email, callback_url } = req.body;
     const userId = req.user.userId;
 
     if (!amount || !receiver_account) {
       return res.status(400).json({ error: 'amount and receiver_account required' });
+    }
+
+    // SSRF-hardened: resolve-then-validate against the shared allow-list
+    // (see BE-015). Re-validated again immediately before every callback
+    // delivery attempt, not just here.
+    if (callback_url && !(await validateCallbackUrl(callback_url))) {
+      return res.status(400).json({ error: 'callback_url must be a public HTTPS endpoint' });
     }
 
     // Validate fields against anchor /info schema
@@ -92,10 +100,15 @@ async function createTransaction(req, res, next) {
 
     const txId = uuidv4();
     await db.query(
-      `INSERT INTO sep31_transactions (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
-      [txId, userId, receiver_account, amount, asset_code, kycVerified]
+      `INSERT INTO sep31_transactions (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status, callback_url)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)`,
+      [txId, userId, receiver_account, amount, asset_code, kycVerified, callback_url || null]
     );
+
+    if (callback_url) {
+      // Fire-and-forget: delivery failures are logged, never block the response.
+      deliverCallback(callback_url, { transaction_id: txId, status: 'pending' }).catch(() => {});
+    }
 
     res.status(201).json({
       id: txId,
