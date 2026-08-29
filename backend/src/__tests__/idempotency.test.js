@@ -107,7 +107,7 @@ describe('idempotency middleware', () => {
     expect(res._jsonSpy).toHaveBeenCalledWith({ txHash: 'abc123' });
   });
 
-  test('returns 422 when same key is reused with a different body (Redis cache hit)', async () => {
+  test('returns 409 when same key is reused with a different body (Redis cache hit)', async () => {
     const originalBody = { amount: 10, recipient_address: 'GABC' };
     const originalHash = crypto.createHash('sha256').update(JSON.stringify(originalBody)).digest('hex');
 
@@ -126,7 +126,7 @@ describe('idempotency middleware', () => {
     await idempotency(req, res, next);
 
     expect(next).not.toHaveBeenCalled();
-    expect(res.statusCode).toBe(422);
+    expect(res.statusCode).toBe(409);
     expect(res._jsonSpy).toHaveBeenCalledWith({
       error: 'Idempotency-Key reused with a different request body',
     });
@@ -155,7 +155,7 @@ describe('idempotency middleware', () => {
     expect(res._jsonSpy).toHaveBeenCalledWith({ txHash: 'def456' });
   });
 
-  test('returns 422 when same key is reused with a different body (DB fallback)', async () => {
+  test('returns 409 when same key is reused with a different body (DB fallback)', async () => {
     const originalBody = { amount: 10, recipient_address: 'GABC' };
     const originalHash = crypto.createHash('sha256').update(JSON.stringify(originalBody)).digest('hex');
 
@@ -173,7 +173,7 @@ describe('idempotency middleware', () => {
     await idempotency(req, res, next);
 
     expect(next).not.toHaveBeenCalled();
-    expect(res.statusCode).toBe(422);
+    expect(res.statusCode).toBe(409);
     expect(res._jsonSpy).toHaveBeenCalledWith({
       error: 'Idempotency-Key reused with a different request body',
     });
