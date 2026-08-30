@@ -30,6 +30,7 @@ const {
   getJobStatus,
   bulkKycUpdate,
   getAuditLogs,
+  getGeoDenialsReport,
 } = require('../controllers/adminController');
 const { getDeadLetterNotifications } = require('../controllers/notificationController');
 const {
@@ -257,6 +258,7 @@ router.get('/notifications/dead-letter', getDeadLetterNotifications);
 // Immutable Audit Log (#698)
 // ---------------------------------------------------------------------------
 router.get('/audit-logs', getAuditLogs);
+router.get('/compliance/geo-denials', getGeoDenialsReport);
 
 // ---------------------------------------------------------------------------
 // Fee Configuration CRUD with Audit Trail
