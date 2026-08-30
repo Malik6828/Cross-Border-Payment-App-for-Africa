@@ -101,6 +101,21 @@ const rateLimiterRedisFailuresTotal = new client.Counter({
   registers: [registry],
 });
 
+const txQueueDepth = new client.Gauge({
+  name: 'afripay_tx_queue_depth',
+  help: 'Number of per-wallet transaction submission queues currently holding a pending/in-flight task (txQueue.js)',
+  registers: [registry],
+});
+
+const txQueueBackpressure = new client.Gauge({
+  name: 'afripay_tx_queue_backpressure',
+  help: 'Whether the transaction submission queue is under backpressure — total pending tasks across all wallet queues exceeds the configured threshold (1) or not (0)',
+  registers: [registry],
+});
+
+const txQueuePendingTasksTotal = new client.Gauge({
+  name: 'afripay_tx_queue_pending_tasks_total',
+  help: 'Total pending/in-flight tasks across all per-wallet transaction submission queues (txQueue.js)',
 const sep31CallbackSkippedTotal = new client.Counter({
   name: 'afripay_sep31_callback_skipped_total',
   help: 'Total SEP-31 callbacks skipped instead of being delivered, labelled by reason',
@@ -124,5 +139,8 @@ module.exports = {
   amlScreeningCoverageGauge,
   rateLimiterDegraded,
   rateLimiterRedisFailuresTotal,
+  txQueueDepth,
+  txQueueBackpressure,
+  txQueuePendingTasksTotal,
   sep31CallbackSkippedTotal,
 };

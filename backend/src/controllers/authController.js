@@ -358,7 +358,7 @@ async function login(req, res, next) {
     const device_token = rememberDevice ? signDeviceToken({ userId: user.id }) : undefined;
 
     res.cookie(COOKIE_NAME, raw, COOKIE_OPTIONS);
-    setCsrfCookie(res);
+    setCsrfCookie(res, familyId);
     audit.log(user.id, 'login_success', req.ip, req.headers['user-agent']);
     res.json({
       token,
@@ -764,7 +764,7 @@ async function refresh(req, res, next) {
     });
 
     res.cookie(COOKIE_NAME, newRaw, COOKIE_OPTIONS);
-    setCsrfCookie(res);
+    setCsrfCookie(res, record.family_id);
     res.json({ token });
   } catch (err) {
     next(err);
