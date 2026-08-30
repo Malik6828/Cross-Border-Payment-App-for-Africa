@@ -1,5 +1,6 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../db');
+const StellarSdk = require('@stellar/stellar-sdk');
 
 async function create(req, res, next) {
   try {
@@ -11,6 +12,9 @@ async function create(req, res, next) {
     }
     if (!['daily', 'weekly', 'monthly'].includes(frequency)) {
       return res.status(400).json({ error: 'Invalid frequency' });
+    }
+    if (!recipient_wallet || !StellarSdk.StrKey.isValidEd25519PublicKey(recipient_wallet)) {
+      return res.status(400).json({ error: 'Invalid recipient wallet address' });
     }
 
     const id = uuidv4();
@@ -52,7 +56,14 @@ async function update(req, res, next) {
     const { amount, frequency, active, recipient_wallet } = req.body;
     const userId = req.user.userId;
 
-    await db.query(
+    if (frequency !== undefined && frequency !== null && !['daily', 'weekly', 'monthly'].includes(frequency)) {
+      return res.status(400).json({ error: 'Invalid frequency' });
+    }
+    if (recipient_wallet !== undefined && recipient_wallet !== null && !StellarSdk.StrKey.isValidEd25519PublicKey(recipient_wallet)) {
+      return res.status(400).json({ error: 'Invalid recipient wallet address' });
+    }
+
+    const result = await db.query(
       `UPDATE scheduled_payments
        SET amount = COALESCE($1, amount),
            frequency = COALESCE($2, frequency),
@@ -61,6 +72,10 @@ async function update(req, res, next) {
        WHERE id = $5 AND user_id = $6`,
       [amount, frequency, active, recipient_wallet, id, userId]
     );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Scheduled payment not found' });
+    }
 
     res.json({ message: 'Scheduled payment updated' });
   } catch (err) {
@@ -73,10 +88,14 @@ async function delete_(req, res, next) {
     const { id } = req.params;
     const userId = req.user.userId;
 
-    await db.query(
+    const result = await db.query(
       `DELETE FROM scheduled_payments WHERE id = $1 AND user_id = $2`,
       [id, userId]
     );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Scheduled payment not found' });
+    }
 
     res.json({ message: 'Scheduled payment deleted' });
   } catch (err) {

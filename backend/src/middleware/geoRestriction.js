@@ -19,18 +19,62 @@ const blockedCountries = new Set(
     .filter(Boolean)
 );
 
+// Whether the X-Forwarded-For header may be trusted.
+// Express only honors X-Forwarded-For when `trust proxy` is explicitly
+// configured. Without it, the header is attacker-controlled and must never
+// be used for geo-location decisions.
+function isTrustProxyConfigured(req) {
+  return Boolean(req.app && req.app.get('trust proxy'));
+}
+
 module.exports = function geoRestriction(req, res, next) {
-  // Determine the client IP.
-  // When behind a reverse proxy with trust-proxy enabled, req.ip already
-  // contains the real client address. Fall back to x-forwarded-for header.
-  const forwarded = req.headers['x-forwarded-for'];
-  const ip =
-    req.ip ||
-    (typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : undefined);
+  const blocked = () =>
+    res.status(451).json({ error: 'Service unavailable in your jurisdiction' });
+
+  // Determine the client IP. When `trust proxy` is configured Express has
+  // already resolved req.ip from X-Forwarded-For using the configured hop
+  // count, so req.ip is authoritative and no direct header access is needed.
+  let ip = req.ip;
+  let ipFromHeader = false;
+
+  if (!ip && isTrustProxyConfigured(req)) {
+    // Express could not resolve the address but the header is safe to parse
+    // because trust proxy is explicitly enabled. Prefer req.ips (the chain
+    // Express resolved) so the hop count is honored.
+    ip =
+      (Array.isArray(req.ips) && req.ips.length > 0 && req.ips[0]) ||
+      (typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for'].split(',')[0].trim()
+        : undefined);
+
+    if (ip) {
+      ipFromHeader = true;
+      logger.warn(
+        'Geo-restriction: resolved client IP from X-Forwarded-For header - verify proxy configuration',
+        {
+          requestId: req.requestId,
+          ip,
+          trustProxy: String(req.app.get('trust proxy')),
+          method: req.method,
+          path: req.originalUrl,
+        }
+      );
+    }
+  }
 
   if (!ip) {
-    // Cannot determine IP – let the request through (fail-open).
-    return next();
+    // Cannot reliably determine the client jurisdiction. Fail closed rather
+    // than trusting a client-supplied header.
+    logger.warn('Geo-restriction: unable to determine client IP - request blocked (fail closed)', {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.originalUrl,
+      forwarded: typeof req.headers['x-forwarded-for'] === 'string'
+        ? req.headers['x-forwarded-for']
+        : undefined,
+    });
+
+    return blocked();
   }
 
   const geo = geoip.lookup(ip);
@@ -40,14 +84,13 @@ module.exports = function geoRestriction(req, res, next) {
     logger.warn('Blocked request from sanctioned country', {
       requestId: req.requestId,
       ip,
+      ipFromHeader,
       country,
       method: req.method,
       path: req.originalUrl,
     });
 
-    return res.status(451).json({
-      error: 'Service unavailable in your jurisdiction',
-    });
+    return blocked();
   }
 
   next();

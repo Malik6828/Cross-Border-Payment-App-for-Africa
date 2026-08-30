@@ -24,8 +24,10 @@ This contract supports a three-party escrow flow:
 
 The escrow lifecycle is:
 
-- `Pending` → `Released` when the assigned agent calls `release_escrow`
+- `Pending` → `Released` when the assigned agent calls `release_escrow` or fully settles the escrow with `partial_release`
 - `Pending` → `Cancelled` when the original sender calls `cancel_escrow`
+
+Completed or cancelled escrow records may be archived after a configurable retention period to limit persistent storage growth.
 
 Fees are calculated in basis points and stored separately as `AccumulatedFees`.
 
@@ -238,6 +240,139 @@ Events:
 
 ---
 
+### `confirm_delivery`
+
+Signature:
+```rust
+fn confirm_delivery(env: Env, agent: Address, escrow_id: u64)
+```
+
+Description:
+- Marks an escrow as having had off-chain payout confirmed by the agent.
+- Prevents the sender from cancelling the escrow after confirmation.
+
+Parameters:
+- `agent` (`Address`) - must authorize the confirmation.
+- `escrow_id` (`u64`) - the escrow to confirm.
+
+Returns:
+- `void`
+
+Authorization:
+- `agent.require_auth()` is required.
+- The caller must match `escrow.agent`.
+
+Panics / Errors:
+- `Escrow {id} not found` if the escrow does not exist.
+- `Only the agent can confirm delivery` if the caller is not the assigned agent.
+- `Escrow is not in pending state` if the escrow is already released or cancelled.
+- `Delivery has already been confirmed` if confirmation has already been submitted.
+
+Events:
+- `DeliveryConfirmed`
+
+---
+
+### `partial_release`
+
+Signature:
+```rust
+fn partial_release(env: Env, agent: Address, escrow_id: u64, amount: i128)
+```
+
+Description:
+- Releases a portion of the escrow amount to the agent with proportional fee calculation.
+- Keeps the escrow in `Pending` state until the remaining amount reaches zero.
+
+Parameters:
+- `agent` (`Address`) - must authorize the release.
+- `escrow_id` (`u64`) - the escrow to partially release.
+- `amount` (`i128`) - the amount to release in stroops.
+
+Returns:
+- `void`
+
+Authorization:
+- `agent.require_auth()` is required.
+- The caller must match `escrow.agent`.
+
+Panics / Errors:
+- `Escrow {id} not found` if the escrow does not exist.
+- `Only the agent can release escrow` if the caller is not the assigned agent.
+- `Escrow is not in pending state` if the escrow is already released or cancelled.
+- `Amount must be positive` if the release amount is zero or negative.
+- `Release amount exceeds escrow balance` if the requested amount is larger than the remaining escrow amount.
+
+Behavior:
+- Calculates `fee_amount = (amount * release_fee_bps) / 10000`.
+- Sends `amount - fee_amount` to the assigned agent.
+- Adds `fee_amount` to `AccumulatedFees` storage.
+- Reduces `escrow.amount` by the released amount.
+- Sets `status = Released` only when the full escrow amount has been paid out.
+
+Events:
+- `PartialRelease`
+
+---
+
+### `set_retention_period`
+
+Signature:
+```rust
+fn set_retention_period(env: Env, admin: Address, retention_secs: u64)
+```
+
+Description:
+- Configures the number of seconds after which completed or cancelled escrow records are eligible for cleanup.
+
+Parameters:
+- `admin` (`Address`) - must authorize the change.
+- `retention_secs` (`u64`) - the retention period in seconds.
+
+Returns:
+- `void`
+
+Authorization:
+- `admin.require_auth()` is required.
+- The caller must match the stored admin.
+
+Panics / Errors:
+- `Retention period must be positive` if zero is passed.
+- `Only admin can perform this action` if the caller is not the stored admin.
+
+---
+
+### `cleanup_escrow`
+
+Signature:
+```rust
+fn cleanup_escrow(env: Env, admin: Address, escrow_id: u64)
+```
+
+Description:
+- Removes a completed or cancelled escrow record from persistent storage once the configured retention period has elapsed.
+
+Parameters:
+- `admin` (`Address`) - must authorize the cleanup.
+- `escrow_id` (`u64`) - the escrow to archive.
+
+Returns:
+- `void`
+
+Authorization:
+- `admin.require_auth()` is required.
+- The caller must match the stored admin.
+
+Panics / Errors:
+- `Escrow {id} not found` if the escrow does not exist.
+- `Only released or cancelled escrows can be cleaned up` if the escrow is still pending.
+- `Escrow retention period has not elapsed` if the configured TTL has not passed since `updated_at`.
+
+Events:
+- `EscrowArchived`
+
+---
+
 ### `get_escrow`
 
 Signature:
@@ -376,6 +511,31 @@ Fields:
 - `escrow_id` (`u64`) - cancelled escrow identifier.
 - `refund_amount` (`i128`) - refunded amount returned to the sender.
 
+### `DeliveryConfirmed`
+
+Emitted by `confirm_delivery`.
+
+Fields:
+- `escrow_id` (`u64`) - escrow identifier.
+- `agent` (`Address`) - agent that confirmed delivery.
+
+### `PartialRelease`
+
+Emitted by `partial_release`.
+
+Fields:
+- `escrow_id` (`u64`) - escrow identifier.
+- `released_amount` (`i128`) - amount released to the agent.
+- `remaining_amount` (`i128`) - amount remaining in escrow.
+- `fee_amount` (`i128`) - release fee for this partial payout.
+
+### `EscrowArchived`
+
+Emitted by `cleanup_escrow`.
+
+Fields:
+- `escrow_id` (`u64`) - archived escrow identifier.
+
 ## Storage Layout
 
 This contract stores state under the following `DataKey` variants in persistent storage:
@@ -384,6 +544,7 @@ This contract stores state under the following `DataKey` variants in persistent 
 - `DataKey::UsdcAddress` -> `Address`
 - `DataKey::EscrowCounter` -> `u64`
 - `DataKey::AccumulatedFees` -> `i128`
+- `DataKey::RetentionPeriodSecs` -> `u64`
 - `DataKey::Escrow(u64)` -> `Escrow`
 
 ### `Escrow` struct layout
@@ -397,10 +558,16 @@ struct Escrow {
     amount: i128,
     release_fee_bps: u32,
     status: EscrowStatus,
+    payout_confirmed: bool,
     created_at: u64,
+    updated_at: u64,
     expires_at: u64,
 }
 ```
+
+### Storage TTL strategy
+
+Completed or cancelled escrows are eligible for cleanup after a configurable retention period. The admin can set the retention TTL via `set_retention_period`, and then manually archive old records with `cleanup_escrow` once the escrow's `updated_at` timestamp is older than the retention threshold.
 
 ### `EscrowStatus` enum
 
@@ -472,9 +639,10 @@ async function createEscrow(senderKeypair, recipientAddress, agentAddress, amoun
 1. Deploy and initialize the contract with `initialize(admin, usdc_address)`.
 2. Call `create_escrow(sender, recipient, agent, amount, release_fee_bps)`.
 3. Optionally call `deposit(sender, escrow_id, amount)` to add funds.
-4. Call `release_escrow(agent, escrow_id)` when payout is confirmed.
-5. Call `cancel_escrow(sender, escrow_id)` to refund pending escrow.
-6. Admin calls `withdraw_fees(admin, amount)` to collect fees.
+4. Call `confirm_delivery(agent, escrow_id)` after the agent confirms off-chain payout.
+5. Call `partial_release(agent, escrow_id, amount)` to release funds in installments, or `release_escrow(agent, escrow_id)` to release the remaining balance.
+6. Call `cancel_escrow(sender, escrow_id)` to refund pending escrow before delivery confirmation.
+7. Admin calls `withdraw_fees(admin, amount)` to collect fees.
 
 ## Deployment
 
@@ -529,6 +697,41 @@ soroban contract deploy \
 - `cancel_escrow` can only be called by the original sender.
 - `withdraw_fees` can only be called by the stored admin.
 - Fees are stored in `AccumulatedFees` and never directly withdrawable by non-admin accounts.
+
+## Security Audit Checklist
+
+### Re-Entrancy
+- Soroban prevents re-entrancy by disallowing cross-contract calls that re-enter the same contract instance within a single transaction invocation.
+- All functions that make external token calls (`create_escrow`, `release_escrow`, `cancel_escrow`, `expire_escrow`) follow the **checks-effects-interactions** pattern: contract storage state is updated before any `token.transfer` call.
+  - `create_escrow`: escrow record written to storage before `token.transfer`.
+  - `release_escrow`: status set to `Released` and fees accumulated before `token.transfer`.
+  - `cancel_escrow`: status set to `Cancelled` before `token.transfer` refund.
+
+### Integer Overflow
+- Soroban uses `i128` for token amounts with checked arithmetic.
+- The escrow counter uses `checked_add` to prevent overflow.
+
+### Access Control
+- `initialize`: no auth required (single-use, blocked on re-call).
+- `create_escrow`: `sender.require_auth()`.
+- `release_escrow`: `agent.require_auth()` + agent address match.
+- `cancel_escrow`: `sender.require_auth()` + sender address match.
+- `withdraw_fees`: `admin.require_auth()` + stored admin match.
+- `upgrade`, `migrate`, `set_retention_period`, `cleanup_escrow`, `update_fee`, `set_kyc_contract`: admin-only.
+
+### Event Emission Completeness
+- `EscrowInitialized` on `initialize`.
+- `EscrowCreated` on `create_escrow` and each entry in `batch_create_escrow`.
+- `EscrowReleased` on `release_escrow`.
+- `EscrowCancelled` on `cancel_escrow`.
+- `EscrowExpired` on `expire_escrow`.
+- `DeliveryConfirmed` on `confirm_delivery`.
+- `PartialRelease` on `partial_release`.
+- `EscrowArchived` on `cleanup_escrow`.
+- `FeesWithdrawn` on `withdraw_fees`.
+- `FeeUpdated` on `update_fee`.
+- `Upgraded` on `upgrade`.
+- `Migrated` on `migrate`.
 
 ## Build
 

@@ -27,6 +27,7 @@ const {
 } = require('../controllers/walletController');
 const { getContacts, addContact, deleteContact } = require('../controllers/contactsController');
 const { getStatus } = require('../services/horizonRateLimit');
+const isAdminOrOwner = require('../middleware/isAdminOrOwner');
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -121,6 +122,13 @@ router.post(
   '/trustline',
   [
     body('asset').trim().notEmpty().withMessage('asset is required').isAlphanumeric().isLength({ max: 12 }).withMessage('Invalid asset code'),
+    body('asset_issuer')
+      .if(body('asset').not().equals('XLM'))
+      .notEmpty().withMessage('asset_issuer is required for non-XLM assets')
+      .custom((v) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(v)) throw new Error('asset_issuer must be a valid Stellar public key');
+        return true;
+      }),
     body('limit').optional().isFloat({ min: 0 }).withMessage('limit must be a non-negative number'),
     body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID'),
   ],
@@ -129,7 +137,16 @@ router.post(
 );
 router.delete(
   '/trustline/:asset',
-  [param('asset').isAlphanumeric().isLength({ max: 12 }).withMessage('Invalid asset code')],
+  [
+    param('asset').isAlphanumeric().isLength({ max: 12 }).withMessage('Invalid asset code'),
+    query('asset_issuer')
+      .optional()
+      .custom((v) => {
+        if (!StellarSdk.StrKey.isValidEd25519PublicKey(v)) throw new Error('asset_issuer must be a valid Stellar public key');
+        return true;
+      }),
+    query('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID'),
+  ],
   validate,
   removeTrustlineHandler,
 );
@@ -153,12 +170,22 @@ router.post(
 );
 
 // Multisig / business account routes
-router.post('/upgrade-business', upgradeToBusinessAccount);
+// NOTE: register each (method, path) pair exactly once in this file — Express uses the
+// first matching registration, so a later duplicate is silently dead code. See
+// scripts/check-duplicate-routes.js (run in CI) which fails the build on any new duplicate.
+router.post(
+  '/upgrade-business',
+  [body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID')],
+  validate,
+  upgradeToBusinessAccount,
+);
 router.get('/signers', listSigners);
+router.get('/signers', isAdminOrOwner(), listSigners);
 router.get('/signers/horizon', getSignersFromHorizon);
 router.post('/clear-inflation-destination', clearInflationDestinationHandler);
 router.post(
   '/signers',
+  isAdminOrOwner(),
   [
     body('signer_public_key')
       .notEmpty()
@@ -174,6 +201,7 @@ router.post(
 );
 router.delete(
   '/signers/:signer_public_key',
+  isAdminOrOwner(),
   [
     param('signer_public_key').custom((v) => {
       if (!StellarSdk.StrKey.isValidEd25519PublicKey(v)) throw new Error('Invalid Stellar public key');
@@ -184,7 +212,10 @@ router.delete(
   removeSigner,
 );
 
-// Account data entries (manageData)
+// Account data entries (manageData) — store arbitrary key-value pairs on the Stellar account
+// GET    /api/wallet/data-entries        — list all entries
+// POST   /api/wallet/data-entry          — set/update an entry { key, value (≤64 chars) }
+// DELETE /api/wallet/data-entry/:key     — delete an entry by key
 router.get('/data-entries', listDataEntries);
 router.post('/data-entry',
   [

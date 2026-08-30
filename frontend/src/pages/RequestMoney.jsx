@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Copy, CheckCheck, Share2, Send } from 'lucide-react';
+import { ArrowLeft, Copy, CheckCheck, Share2, Send, ExternalLink, Info } from 'lucide-react';
 import api from '../utils/api';
 import { CURRENCIES } from '../utils/currency';
 import toast from 'react-hot-toast';
@@ -15,8 +15,10 @@ export default function RequestMoney() {
     memo: ''
   });
   const [paymentLink, setPaymentLink] = useState('');
+  const [requestDetails, setRequestDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedDeep, setCopiedDeep] = useState(false);
 
   const handleCreate = async (e) => {
     e.preventDefault();
@@ -33,6 +35,7 @@ export default function RequestMoney() {
         memo: form.memo || undefined
       });
       setPaymentLink(res.data.paymentLink);
+      setRequestDetails({ id: res.data.id, amount: res.data.amount, asset: res.data.asset });
       toast.success(t('request.created') || 'Payment request created');
     } catch (err) {
       toast.error(err.response?.data?.error || t('request.error') || 'Failed to create request');
@@ -41,19 +44,42 @@ export default function RequestMoney() {
     }
   };
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(paymentLink);
-    setCopied(true);
-    toast.success(t('common.copied'));
-    setTimeout(() => setCopied(false), 2000);
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(paymentLink);
+      setCopied(true);
+      toast.success(t('common.copied'));
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Failed to copy link');
+    }
+  };
+
+  const copyDeepLink = async () => {
+    try {
+      await navigator.clipboard.writeText(paymentLink);
+      setCopiedDeep(true);
+      toast.success('Deep link copied');
+      setTimeout(() => setCopiedDeep(false), 2000);
+    } catch {
+      toast.error('Failed to copy deep link');
+    }
   };
 
   const shareLink = async () => {
     if (navigator.share) {
-      await navigator.share({ title: 'Payment Request', text: paymentLink });
+      try {
+        await navigator.share({ title: 'Payment Request', text: paymentLink });
+      } catch {
+        // user cancelled or share failed — fall back to copy
+      }
     } else {
       copyLink();
     }
+  };
+
+  const testDeepLink = () => {
+    window.open(paymentLink, '_blank');
   };
 
   return (
@@ -121,18 +147,28 @@ export default function RequestMoney() {
             <p className="text-green-400 font-semibold text-sm">{t('request.success') || 'Payment request created!'}</p>
           </div>
 
-          <div className="bg-gray-900 rounded-xl p-4">
-            <p className="text-xs text-gray-500 mb-2">{t('request.link') || 'Payment Link'}</p>
+          <div className="bg-gray-900 rounded-xl p-4 border border-primary-500/30">
+            <div className="flex items-center gap-2 mb-2">
+              <ExternalLink size={14} className="text-primary-400" />
+              <p className="text-xs text-gray-400 font-semibold uppercase tracking-wider">Deep Link</p>
+            </div>
             <p className="text-white font-mono text-xs break-all leading-relaxed">{paymentLink}</p>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="bg-gray-800/50 rounded-xl p-3 flex items-start gap-2">
+            <Info size={14} className="text-gray-500 shrink-0 mt-0.5" />
+            <p className="text-xs text-gray-400">
+              Recipients with an AfriPay account will be taken directly to the send form with the amount and your address pre-filled. New users will be guided to register first, then redirected to complete the payment.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
             <button
-              onClick={copyLink}
+              onClick={copyDeepLink}
               className="bg-gray-800 hover:bg-gray-700 rounded-xl py-3.5 flex items-center justify-center gap-2 text-white font-medium transition-colors"
             >
-              {copied ? <CheckCheck size={18} className="text-primary-500" /> : <Copy size={18} />}
-              {copied ? t('common.copied') : t('common.copy')}
+              {copiedDeep ? <CheckCheck size={18} className="text-primary-500" /> : <Copy size={18} />}
+              {copiedDeep ? t('common.copied') : 'Copy Link'}
             </button>
             <button
               onClick={shareLink}
@@ -140,10 +176,16 @@ export default function RequestMoney() {
             >
               <Share2 size={18} /> {t('common.share')}
             </button>
+            <button
+              onClick={testDeepLink}
+              className="bg-gray-800 hover:bg-gray-700 rounded-xl py-3.5 flex items-center justify-center gap-2 text-white font-medium transition-colors"
+            >
+              <ExternalLink size={18} /> Preview
+            </button>
           </div>
 
           <button
-            onClick={() => { setPaymentLink(''); setForm({ amount: '', asset: 'XLM', memo: '' }); }}
+            onClick={() => { setPaymentLink(''); setRequestDetails(null); setForm({ amount: '', asset: 'XLM', memo: '' }); }}
             className="w-full text-gray-400 hover:text-white text-sm py-2 transition-colors"
           >
             {t('request.create_another') || 'Create Another'}

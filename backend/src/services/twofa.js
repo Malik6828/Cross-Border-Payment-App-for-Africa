@@ -1,6 +1,7 @@
 const speakeasy = require('speakeasy');
 const QRCode = require('qrcode');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 
 async function generateSecret(email) {
   const secret = speakeasy.generateSecret({
@@ -10,7 +11,7 @@ async function generateSecret(email) {
   });
 
   const qrCode = await QRCode.toDataURL(secret.otpauth_url);
-  return { secret: secret.base32, qrCode };
+  return { secret: secret.base32, qrCode, otpauthUri: secret.otpauth_url };
 }
 
 function verifyToken(secret, token) {
@@ -37,9 +38,19 @@ function useBackupCode(codes, code) {
   return codes;
 }
 
+async function hashBackupCode(code) {
+  return bcrypt.hash(code, 10);
+}
+
+async function verifyBackupCode(code, hash) {
+  return bcrypt.compare(code, hash);
+}
+
 module.exports = {
   generateSecret,
   verifyToken,
   generateBackupCodes,
-  useBackupCode
+  useBackupCode,
+  hashBackupCode,
+  verifyBackupCode,
 };

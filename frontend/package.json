@@ -6,6 +6,7 @@
     "@headlessui/react": "^1.7.17",
     "@ledgerhq/hw-app-str": "^7.7.1",
     "@ledgerhq/hw-transport-webusb": "^6.34.1",
+    "@stellar/stellar-sdk": "^12.0.0",
     "axios": "^1.6.2",
     "i18next": "^25.10.5",
     "idb": "^8.0.3",
@@ -40,16 +41,14 @@
     "format": "prettier --write \"**/*.{js,jsx,json,md,html,css}\"",
     "format:check": "prettier --check \"**/*.{js,jsx,json,md,html,css}\""
   },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
+  "jest": {
+    "transformIgnorePatterns": [
+      "/node_modules/(?!(axios)/)"
     ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+    "moduleNameMapper": {
+      "^@sentry/react$": "<rootDir>/src/__mocks__/@sentry/react.js",
+      "^@ledgerhq/hw-transport-webusb$": "<rootDir>/src/__mocks__/@ledgerhq/hw-transport-webusb.js",
+      "^@ledgerhq/hw-app-str$": "<rootDir>/src/__mocks__/@ledgerhq/hw-app-str.js"
+    }
   }
 }

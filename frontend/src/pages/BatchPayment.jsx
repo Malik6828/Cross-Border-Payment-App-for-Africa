@@ -1,12 +1,15 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useRef, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, FileUp, Plus, Send, Trash2, Upload } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, Download, FileUp, Loader2, Plus, RotateCcw, Send, Trash2, Upload, XCircle } from 'lucide-react';
 import toast from 'react-hot-toast';
 import api from '../utils/api';
 import { CURRENCIES, truncateAddress } from '../utils/currency';
+import { validateStellarAddress } from '../utils/validation';
+
+const SINGLE_TRANSFER_LIMIT = 10000;
 
 function createEmptyRecipient() {
-  return { recipient_address: '', amount: '' };
+  return { recipient_address: '', amount: '', memo: '' };
 }
 
 function splitCsvLine(line) {
@@ -39,32 +42,118 @@ function splitCsvLine(line) {
   return values;
 }
 
+function validateAmount(amount) {
+  if (!amount && amount !== 0) {
+    return 'Amount is required';
+  }
+  
+  const numAmount = parseFloat(amount);
+  
+  if (isNaN(numAmount)) {
+    return 'Amount must be a valid number';
+  }
+  
+  if (numAmount <= 0) {
+    return 'Amount must be a positive number';
+  }
+  
+  if (numAmount > SINGLE_TRANSFER_LIMIT) {
+    return `Amount exceeds single-transfer limit of ${SINGLE_TRANSFER_LIMIT.toLocaleString()} USDC`;
+  }
+  
+  return null;
+}
+
+function validateRecipient(recipient, rowNumber) {
+  const errors = [];
+  
+  const addressError = validateStellarAddress(recipient.recipient_address);
+  if (addressError) {
+    errors.push(addressError);
+  }
+  
+  const amountError = validateAmount(recipient.amount);
+  if (amountError) {
+    errors.push(amountError);
+  }
+  
+  if (errors.length > 0) {
+    return {
+      rowNumber,
+      address: recipient.recipient_address,
+      amount: recipient.amount,
+      memo: recipient.memo || '',
+      error: errors.join('; ')
+    };
+  }
+  
+  return null;
+}
+
 function parseRecipientsCsv(text) {
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
 
-  if (!lines.length) return [];
+  if (!lines.length) return { recipients: [], errors: [] };
 
   const [headerLine, ...rows] = lines;
   const headers = splitCsvLine(headerLine).map((header) => header.toLowerCase());
+  
   const addressIndex = headers.findIndex((header) =>
     ['recipient_address', 'address', 'wallet_address', 'recipient'].includes(header)
   );
   const amountIndex = headers.findIndex((header) => header === 'amount');
+  const memoIndex = headers.findIndex((header) => header === 'memo');
 
   if (addressIndex === -1 || amountIndex === -1) {
-    throw new Error('CSV must include recipient_address and amount columns.');
+    throw new Error('CSV must include address and amount columns.');
   }
 
-  return rows.map((row) => {
+  const recipients = [];
+  const validationErrors = [];
+
+  rows.forEach((row, index) => {
     const columns = splitCsvLine(row);
-    return {
+    const recipient = {
       recipient_address: columns[addressIndex] || '',
       amount: columns[amountIndex] || '',
+      memo: memoIndex >= 0 ? columns[memoIndex] || '' : ''
     };
-  }).filter((recipient) => recipient.recipient_address || recipient.amount);
+
+    // Skip completely empty rows
+    if (!recipient.recipient_address && !recipient.amount) {
+      return;
+    }
+
+    const error = validateRecipient(recipient, index + 2); // +2 for header row and 0-indexing
+    
+    if (error) {
+      validationErrors.push(error);
+    }
+    
+    recipients.push(recipient);
+  });
+
+  return { recipients, errors: validationErrors };
+}
+
+function downloadCsvTemplate() {
+  const template = `address,amount,memo
+GABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCDEFGHIJKLMNOP,100.50,Optional memo
+GXYZ234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ234567890ABCD,250.75,Another example`;
+  
+  const blob = new Blob([template], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'batch_payment_template.csv';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast.success('Template downloaded');
 }
 
 export default function BatchPayment() {
@@ -73,18 +162,108 @@ export default function BatchPayment() {
   const [memo, setMemo] = useState('');
   const [memoType, setMemoType] = useState('text');
   const [recipients, setRecipients] = useState([createEmptyRecipient()]);
+  const [validationErrors, setValidationErrors] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const [results, setResults] = useState(null);
+  const [batchId, setBatchId] = useState(null);
+  const [rowStatuses, setRowStatuses] = useState({}); // { [index]: { status, error, txHash } }
+  const [polling, setPolling] = useState(false);
+  const stoppedRef = useRef(false);
+
+  // Poll for per-row statuses after batch submission
+  useEffect(() => {
+    if (!polling || !batchId) return;
+    stoppedRef.current = false;
+
+    const pollOnce = async () => {
+      if (stoppedRef.current) return;
+      try {
+        const res = await api.get(`/payments/batch/${batchId}/status`);
+        const statuses = res.data.statuses || [];
+        setRowStatuses((prev) => {
+          const next = { ...prev };
+          statuses.forEach((s) => {
+            next[s.index] = { status: s.status, error: s.error, txHash: s.tx_hash };
+          });
+          return next;
+        });
+        const allTerminal =
+          statuses.length > 0 &&
+          statuses.every((s) => s.status === 'confirmed' || s.status === 'failed');
+        if (allTerminal) {
+          stoppedRef.current = true;
+          setPolling(false);
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+
+    pollOnce();
+    const interval = setInterval(pollOnce, 3000);
+    return () => {
+      stoppedRef.current = true;
+      clearInterval(interval);
+    };
+  }, [polling, batchId]);
+
+  const batchSummary = useMemo(() => {
+    const values = Object.values(rowStatuses);
+    return {
+      confirmed: values.filter((s) => s.status === 'confirmed').length,
+      failed: values.filter((s) => s.status === 'failed').length,
+      processing: values.filter((s) => s.status !== 'confirmed' && s.status !== 'failed').length,
+    };
+  }, [rowStatuses]);
+
+  const handleRetry = async (rowIndex) => {
+    setRowStatuses((prev) => ({ ...prev, [rowIndex]: { ...prev[rowIndex], status: 'pending' } }));
+    try {
+      await api.post(`/payments/batch/${batchId}/retry`, { index: rowIndex });
+      if (!polling) setPolling(true);
+    } catch (err) {
+      setRowStatuses((prev) => ({
+        ...prev,
+        [rowIndex]: { status: 'failed', error: err.response?.data?.error || 'Retry failed' },
+      }));
+    }
+  };
+
+  const exportBatchCsv = () => {
+    const header = 'recipient_address,amount,status,tx_hash,error';
+    const rows = (results?.results || []).map((r) => {
+      const s = rowStatuses[r.index] || {};
+      return [r.recipient_address, r.amount, s.status || r.status || '', s.txHash || '', s.error || r.error || '']
+        .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
+        .join(',');
+    });
+    const csv = [header, ...rows].join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'batch_results.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const filledRecipients = useMemo(
     () => recipients.filter((recipient) => recipient.recipient_address.trim() || recipient.amount),
     [recipients]
   );
 
+  const validRecipients = useMemo(() => {
+    return filledRecipients.filter((recipient, index) => {
+      const error = validateRecipient(recipient, index + 1);
+      return error === null;
+    });
+  }, [filledRecipients]);
+
   const totalAmount = useMemo(
-    () => filledRecipients.reduce((sum, recipient) => sum + (parseFloat(recipient.amount) || 0), 0),
-    [filledRecipients]
+    () => validRecipients.reduce((sum, recipient) => sum + (parseFloat(recipient.amount) || 0), 0),
+    [validRecipients]
   );
+
+  const hasInvalidRows = validationErrors.length > 0;
 
   const handleRecipientChange = (index, field, value) => {
     setRecipients((current) =>
@@ -92,6 +271,8 @@ export default function BatchPayment() {
         currentIndex === index ? { ...recipient, [field]: value } : recipient
       )
     );
+    // Clear validation errors when user makes changes
+    setValidationErrors([]);
   };
 
   const handleCsvUpload = async (event) => {
@@ -100,20 +281,39 @@ export default function BatchPayment() {
 
     try {
       const text = await file.text();
-      const parsed = parseRecipientsCsv(text);
+      const { recipients: parsed, errors } = parseRecipientsCsv(text);
+      
       if (!parsed.length) {
         toast.error('No recipients found in the CSV file');
         return;
       }
 
       setRecipients(parsed.slice(0, 100));
+      setValidationErrors(errors.slice(0, 100));
       setResults(null);
-      toast.success(`Imported ${Math.min(parsed.length, 100)} recipients`);
+      
+      if (errors.length > 0) {
+        toast.error(`Found ${errors.length} validation error${errors.length > 1 ? 's' : ''} in CSV`);
+      } else {
+        toast.success(`Imported ${Math.min(parsed.length, 100)} recipients`);
+      }
     } catch (error) {
       toast.error(error.message || 'Failed to parse CSV file');
     } finally {
       event.target.value = '';
     }
+  };
+
+  const validateCurrentRecipients = () => {
+    const errors = [];
+    filledRecipients.forEach((recipient, index) => {
+      const error = validateRecipient(recipient, index + 1);
+      if (error) {
+        errors.push(error);
+      }
+    });
+    setValidationErrors(errors);
+    return errors.length === 0;
   };
 
   const addRecipient = () => {
@@ -125,6 +325,7 @@ export default function BatchPayment() {
       const next = current.filter((_, currentIndex) => currentIndex !== index);
       return next.length ? next : [createEmptyRecipient()];
     });
+    setValidationErrors([]);
   };
 
   const handleSubmit = async (event) => {
@@ -135,11 +336,18 @@ export default function BatchPayment() {
       return;
     }
 
+    // Validate before submission
+    const isValid = validateCurrentRecipients();
+    if (!isValid) {
+      toast.error('Fix validation errors before submitting');
+      return;
+    }
+
     setSubmitting(true);
     try {
       const payload = {
         asset,
-        recipients: filledRecipients.map((recipient) => ({
+        recipients: validRecipients.map((recipient) => ({
           recipient_address: recipient.recipient_address.trim(),
           amount: parseFloat(recipient.amount),
         })),
@@ -151,8 +359,17 @@ export default function BatchPayment() {
       }
 
       const response = await api.post('/payments/batch', payload);
-      setResults(response.data);
-      toast.success(response.data.message || 'Batch payment submitted');
+      const data = response.data;
+      setResults(data);
+      toast.success(data.message || 'Batch payment submitted');
+
+      if (data.batch_id) {
+        setBatchId(data.batch_id);
+        const initial = {};
+        filledRecipients.forEach((_, i) => { initial[i] = { status: 'pending' }; });
+        setRowStatuses(initial);
+        setPolling(true);
+      }
     } catch (error) {
       const responseData = error.response?.data;
       if (responseData?.results) {
@@ -180,11 +397,21 @@ export default function BatchPayment() {
             </p>
           </div>
 
-          <label className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white px-4 py-3 rounded-2xl cursor-pointer transition-colors">
-            <Upload size={18} />
-            <span>Import CSV</span>
-            <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleCsvUpload} />
-          </label>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={downloadCsvTemplate}
+              className="inline-flex items-center gap-2 bg-gray-700 hover:bg-gray-600 text-white px-4 py-3 rounded-2xl transition-colors"
+            >
+              <Download size={18} />
+              <span className="hidden md:inline">Template</span>
+            </button>
+            <label className="inline-flex items-center gap-2 bg-primary-500 hover:bg-primary-600 text-white px-4 py-3 rounded-2xl cursor-pointer transition-colors">
+              <Upload size={18} />
+              <span>Import CSV</span>
+              <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleCsvUpload} />
+            </label>
+          </div>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-6">
@@ -229,6 +456,87 @@ export default function BatchPayment() {
             </div>
           </div>
 
+          {/* Validation Errors Table */}
+          {validationErrors.length > 0 && (
+            <div className="bg-red-950/30 border border-red-500/50 rounded-3xl overflow-hidden">
+              <div className="flex items-center gap-3 px-4 py-3 bg-red-900/30 border-b border-red-500/50">
+                <AlertCircle size={20} className="text-red-400" />
+                <div>
+                  <p className="text-red-300 font-semibold">Validation Errors</p>
+                  <p className="text-xs text-red-400">{validationErrors.length} row{validationErrors.length > 1 ? 's' : ''} with errors - fix before submitting</p>
+                </div>
+              </div>
+              
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-red-900/20 border-b border-red-500/50">
+                    <tr className="text-left">
+                      <th className="px-4 py-3 text-xs uppercase tracking-wider text-red-300">Row</th>
+                      <th className="px-4 py-3 text-xs uppercase tracking-wider text-red-300">Address</th>
+                      <th className="px-4 py-3 text-xs uppercase tracking-wider text-red-300">Amount</th>
+                      <th className="px-4 py-3 text-xs uppercase tracking-wider text-red-300">Error</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-red-500/30">
+                    {validationErrors.map((error, index) => (
+                      <tr key={index} className="hover:bg-red-900/20">
+                        <td className="px-4 py-3 text-red-200 font-mono text-sm">{error.rowNumber}</td>
+                        <td className="px-4 py-3 text-red-200 font-mono text-sm truncate max-w-xs" title={error.address}>
+                          {error.address || <span className="text-red-400 italic">empty</span>}
+                        </td>
+                        <td className="px-4 py-3 text-red-200 font-mono text-sm">
+                          {error.amount || <span className="text-red-400 italic">empty</span>}
+                        </td>
+                        <td className="px-4 py-3 text-red-300 text-sm">{error.error}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Valid Recipients Preview */}
+          {validRecipients.length > 0 && validationErrors.length > 0 && (
+            <div className="bg-green-950/30 border border-green-500/50 rounded-3xl overflow-hidden">
+              <div className="flex items-center gap-3 px-4 py-3 bg-green-900/30 border-b border-green-500/50">
+                <CheckCircle size={20} className="text-green-400" />
+                <div>
+                  <p className="text-green-300 font-semibold">Ready to Send</p>
+                  <p className="text-xs text-green-400">{validRecipients.length} valid row{validRecipients.length > 1 ? 's' : ''} • Total: {totalAmount.toFixed(7)} {asset}</p>
+                </div>
+              </div>
+              
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-green-900/20 border-b border-green-500/50">
+                    <tr className="text-left">
+                      <th className="px-4 py-3 text-xs uppercase tracking-wider text-green-300">Address</th>
+                      <th className="px-4 py-3 text-xs uppercase tracking-wider text-green-300">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-green-500/30">
+                    {validRecipients.slice(0, 5).map((recipient, index) => (
+                      <tr key={index} className="hover:bg-green-900/20">
+                        <td className="px-4 py-3 text-green-200 font-mono text-sm truncate max-w-xs" title={recipient.recipient_address}>
+                          {truncateAddress(recipient.recipient_address, 12)}
+                        </td>
+                        <td className="px-4 py-3 text-green-200 font-mono text-sm">{recipient.amount}</td>
+                      </tr>
+                    ))}
+                    {validRecipients.length > 5 && (
+                      <tr>
+                        <td colSpan="2" className="px-4 py-3 text-center text-green-400 text-sm italic">
+                          ...and {validRecipients.length - 5} more
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
           <div className="bg-gray-950 border border-gray-800 rounded-3xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800">
               <div>
@@ -252,7 +560,7 @@ export default function BatchPayment() {
               <span>Delete</span>
             </div>
 
-            <div className="divide-y divide-gray-800">
+            <div className="divide-y divide-gray-800 max-h-[600px] overflow-y-auto">
               {recipients.map((recipient, index) => (
                 <div key={`${index}-${recipient.recipient_address}`} className="grid gap-3 px-4 py-4 md:grid-cols-[80px_minmax(0,1fr)_180px_72px] md:items-center">
                   <p className="text-xs uppercase tracking-[0.2em] text-gray-500 md:text-sm">{index + 1}</p>
@@ -287,8 +595,11 @@ export default function BatchPayment() {
 
           <div className="grid gap-4 md:grid-cols-3">
             <div className="bg-gray-950 border border-gray-800 rounded-2xl p-4">
-              <p className="text-gray-500 text-sm">Recipients</p>
-              <p className="text-2xl font-semibold text-white mt-1">{filledRecipients.length}</p>
+              <p className="text-gray-500 text-sm">Valid Recipients</p>
+              <p className="text-2xl font-semibold text-white mt-1">{validRecipients.length}</p>
+              {validationErrors.length > 0 && (
+                <p className="text-xs text-red-400 mt-1">{validationErrors.length} invalid</p>
+              )}
             </div>
             <div className="bg-gray-950 border border-gray-800 rounded-2xl p-4">
               <p className="text-gray-500 text-sm">Total amount</p>
@@ -302,11 +613,12 @@ export default function BatchPayment() {
 
           <button
             type="submit"
-            disabled={submitting || !filledRecipients.length}
-            className="w-full md:w-auto inline-flex items-center justify-center gap-2 bg-primary-500 hover:bg-primary-600 disabled:opacity-50 text-white px-6 py-3 rounded-2xl font-semibold"
+            disabled={submitting || !validRecipients.length || hasInvalidRows}
+            className="w-full md:w-auto inline-flex items-center justify-center gap-2 bg-primary-500 hover:bg-primary-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-2xl font-semibold"
+            title={hasInvalidRows ? 'Fix validation errors before submitting' : ''}
           >
             {submitting ? <FileUp size={18} className="animate-pulse" /> : <Send size={18} />}
-            Submit Batch
+            {hasInvalidRows ? 'Fix Errors to Submit' : 'Submit Batch'}
           </button>
         </form>
       </div>
@@ -316,42 +628,101 @@ export default function BatchPayment() {
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="text-2xl font-bold text-white">Batch Results</h2>
-              <p className="text-gray-400 mt-1">
-                {results.summary?.successful || 0} succeeded, {results.summary?.failed || 0} failed.
-              </p>
+              {batchId ? (
+                <div className="flex items-center gap-4 mt-1 text-sm">
+                  <span className="text-green-400">{batchSummary.confirmed} confirmed</span>
+                  <span className="text-red-400">{batchSummary.failed} failed</span>
+                  {batchSummary.processing > 0 && (
+                    <span className="text-blue-400 flex items-center gap-1">
+                      <Loader2 size={13} className="animate-spin" />
+                      {batchSummary.processing} processing
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <p className="text-gray-400 mt-1">
+                  {results.summary?.successful || 0} succeeded, {results.summary?.failed || 0} failed.
+                </p>
+              )}
             </div>
-            {results.transaction?.tx_hash && (
-              <div className="text-sm text-gray-400">
-                <p>Ledger {results.transaction.ledger}</p>
-                <p className="font-mono text-xs">{results.transaction.tx_hash}</p>
-              </div>
-            )}
+            <div className="flex items-center gap-3">
+              {results.transaction?.tx_hash && (
+                <div className="text-sm text-gray-400">
+                  <p>Ledger {results.transaction.ledger}</p>
+                  <p className="font-mono text-xs">{results.transaction.tx_hash}</p>
+                </div>
+              )}
+              {batchId && !polling && (
+                <button
+                  type="button"
+                  onClick={exportBatchCsv}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-800 hover:bg-gray-700 text-gray-300 text-sm transition-colors"
+                >
+                  <Download size={15} /> Export CSV
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="space-y-3">
-            {(results.results || []).map((result) => (
-              <div
-                key={`${result.index}-${result.recipient_address}`}
-                className={`rounded-2xl border px-4 py-3 ${
-                  result.status === 'success'
-                    ? 'border-green-500/30 bg-green-500/10'
-                    : 'border-red-500/30 bg-red-500/10'
-                }`}
-              >
-                <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
-                  <div>
-                    <p className="text-white font-medium">
-                      Row {result.index + 1}: {truncateAddress(result.recipient_address, 10)}
-                    </p>
-                    <p className="text-sm text-gray-300">{result.amount} {asset}</p>
+            {(results.results || []).map((result) => {
+              const rowStatus = rowStatuses[result.index] || {};
+              const displayStatus = rowStatus.status || result.status;
+              const displayError = rowStatus.error || result.error;
+              const isPending = displayStatus === 'pending';
+              const isProcessing = displayStatus === 'processing';
+              const isConfirmed = displayStatus === 'confirmed' || displayStatus === 'success';
+              const isFailed = displayStatus === 'failed';
+
+              return (
+                <div
+                  key={`${result.index}-${result.recipient_address}`}
+                  className={`rounded-2xl border px-4 py-3 ${
+                    isConfirmed
+                      ? 'border-green-500/30 bg-green-500/10'
+                      : isFailed
+                      ? 'border-red-500/30 bg-red-500/10'
+                      : 'border-gray-700 bg-gray-800/50'
+                  }`}
+                >
+                  <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-white font-medium">
+                        Row {result.index + 1}: {truncateAddress(result.recipient_address, 10)}
+                      </p>
+                      <p className="text-sm text-gray-300">{result.amount} {asset}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {isPending && <Loader2 size={16} className="animate-spin text-yellow-400" />}
+                      {isProcessing && <Loader2 size={16} className="animate-spin text-blue-400" />}
+                      {isConfirmed && <CheckCircle2 size={16} className="text-green-400" />}
+                      {isFailed && <XCircle size={16} className="text-red-400" />}
+                      <span className={
+                        isConfirmed ? 'text-green-400' :
+                        isFailed ? 'text-red-400' :
+                        isPending ? 'text-yellow-400' :
+                        'text-blue-400'
+                      }>
+                        {isConfirmed ? 'Confirmed' : isFailed ? 'Failed' : isPending ? 'Pending' : 'Processing'}
+                      </span>
+                      {isFailed && batchId && (
+                        <button
+                          type="button"
+                          onClick={() => handleRetry(result.index)}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs transition-colors"
+                        >
+                          <RotateCcw size={12} /> Retry
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <p className={result.status === 'success' ? 'text-green-400' : 'text-red-400'}>
-                    {result.status === 'success' ? 'Success' : 'Failed'}
-                  </p>
+                  {displayError && <p className="text-sm text-red-300 mt-2">{displayError}</p>}
+                  {rowStatus.txHash && (
+                    <p className="text-xs text-gray-500 font-mono mt-1 truncate">{rowStatus.txHash}</p>
+                  )}
                 </div>
-                {result.error && <p className="text-sm text-red-300 mt-2">{result.error}</p>}
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

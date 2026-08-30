@@ -34,17 +34,25 @@ const db = require('./db');
 const app = require('./app');
 const { initStreams } = require('./services/horizonWorker');
 const { detectTestnetReset } = require('./services/stellar');
+const { initEmailQueue, drainEmailQueue } = require('./services/email');
+const { startPriceRefreshJob } = require('./services/priceOracle');
 const { syncOfferEvents } = require('./jobs/syncOfferEvents');
 const ledgerListener = require('./services/ledgerListener');
 const { Server: SocketIOServer } = require('socket.io');
 const jwt = require('jsonwebtoken');
+const { startScheduler } = require('./scheduler');
+const { setSocketIO } = require('./services/notificationInbox');
 
 const PORT = process.env.PORT || 5000;
 const SHUTDOWN_TIMEOUT_MS = 30_000;
 
+initEmailQueue();
+startPriceRefreshJob();
+
 const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`, { port: PORT });
   initStreams();
+  startScheduler();
 
   // Warn if testnet was reset since last startup
   if (process.env.NODE_ENV !== 'production') {
@@ -54,13 +62,6 @@ const server = app.listen(PORT, () => {
       }
     }).catch(() => {});
   }
-  // Sync DEX offer events every 2 minutes
-  const OFFER_SYNC_INTERVAL_MS = parseInt(process.env.OFFER_SYNC_INTERVAL_MS || '120000', 10);
-  setInterval(() => {
-    syncOfferEvents().catch((err) =>
-      logger.warn('syncOfferEvents interval error', { error: err.message })
-    );
-  }, OFFER_SYNC_INTERVAL_MS);
 });
 
 // Socket.IO — scoped per authenticated user (JWT-based room)
@@ -100,30 +101,27 @@ io.on('connection', async (socket) => {
     logger.info('Socket disconnected', { userId: socket.userId });
   });
 });
-require('dotenv').config();
-const validateEnv = require('./utils/validateEnv');
-const logger = require('./utils/logger');
-const { startScheduler } = require('./jobs/scheduler');
 
 ledgerListener.setSocketIO(io);
+ledgerListener.initStreams();
+setSocketIO(io);
 
 async function shutdown(signal) {
   logger.info(`${signal} received — shutting down gracefully`);
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  logger.info(`Server running on port ${PORT}`, { port: PORT });
-  startScheduler();
-});
   const forceExit = setTimeout(() => {
     logger.error('Shutdown timeout exceeded — forcing exit');
     process.exit(1);
   }, SHUTDOWN_TIMEOUT_MS).unref();
 
-  scheduledPaymentsJob.stop();
-
   server.close(async () => {
     clearTimeout(forceExit);
+    try {
+      await drainEmailQueue();
+      logger.info('Email queue drained');
+    } catch (err) {
+      logger.error('Error draining email queue', { message: err.message });
+    }
     try {
       await db.pool.end();
       logger.info('DB pool closed');

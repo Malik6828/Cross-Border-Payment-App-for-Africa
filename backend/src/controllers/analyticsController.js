@@ -1,6 +1,7 @@
 const db = require('../db');
+const { validateDateRange } = require('../utils/historyQuery');
 
-exports.summary = async (req, res) => {
+exports.summary = async (req, res, next) => {
   try {
     const walletResult = await db.query(
       'SELECT public_key FROM wallets WHERE user_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1',
@@ -21,6 +22,11 @@ exports.summary = async (req, res) => {
     }
     if (from > to) {
       return res.status(400).json({ error: 'from must be before or equal to to' });
+    }
+
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
     }
 
     const walletCondition = '(sender_wallet = $1 OR recipient_wallet = $1)';
@@ -72,6 +78,155 @@ exports.summary = async (req, res) => {
       transaction_frequency: frequency.rows,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
+  }
+};
+
+exports.volume = async (req, res, next) => {
+  try {
+    const now = new Date();
+    const defaultFrom = new Date(now);
+    defaultFrom.setDate(defaultFrom.getDate() - 30);
+
+    const from = req.query.from ? new Date(req.query.from) : defaultFrom;
+    const to = req.query.to ? new Date(req.query.to) : now;
+
+    if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format; use ISO 8601 (e.g. YYYY-MM-DD)' });
+    }
+    if (from > to) {
+      return res.status(400).json({ error: 'from must be before or equal to to' });
+    }
+
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
+    }
+
+    const rangeDays = Math.ceil((to - from) / (1000 * 60 * 60 * 24));
+
+    let rows;
+
+    if (rangeDays > 7) {
+      // Use the pre-aggregated materialized view for longer ranges to avoid full table scans
+      const result = await db.query(
+        `WITH date_range AS (
+           SELECT generate_series($1::date, $2::date, '1 day'::interval)::date AS day
+         ),
+         asset_list AS (
+           SELECT DISTINCT asset FROM daily_payment_aggregates
+            WHERE day >= $1::date AND day <= $2::date
+         ),
+         base AS (
+           SELECT dr.day, al.asset FROM date_range dr CROSS JOIN asset_list al
+         )
+         SELECT
+           b.day,
+           b.asset,
+           COALESCE(a.tx_count, 0)    AS tx_count,
+           COALESCE(a.total_amount, 0) AS total_amount,
+           COALESCE(a.avg_amount, 0)   AS avg_amount
+         FROM base b
+         LEFT JOIN daily_payment_aggregates a ON a.day = b.day AND a.asset = b.asset
+         ORDER BY b.day ASC, b.asset`,
+        [from, to],
+      );
+      rows = result.rows;
+    } else {
+      // Live query for short ranges (≤ 7 days); generate_series fills zero-count days
+      const result = await db.query(
+        `WITH date_range AS (
+           SELECT generate_series($1::date, $2::date, '1 day'::interval)::date AS day
+         ),
+         asset_list AS (
+           SELECT DISTINCT asset FROM transactions
+            WHERE created_at >= $1 AND created_at <= $2 AND status = 'completed'
+         ),
+         base AS (
+           SELECT dr.day, al.asset FROM date_range dr CROSS JOIN asset_list al
+         ),
+         agg AS (
+           SELECT DATE(created_at) AS day, asset,
+                  COUNT(*)         AS tx_count,
+                  SUM(amount)      AS total_amount,
+                  AVG(amount)      AS avg_amount
+             FROM transactions
+            WHERE created_at >= $1 AND created_at <= $2 AND status = 'completed'
+            GROUP BY DATE(created_at), asset
+         )
+         SELECT
+           b.day,
+           b.asset,
+           COALESCE(a.tx_count, 0)    AS tx_count,
+           COALESCE(a.total_amount, 0) AS total_amount,
+           COALESCE(a.avg_amount, 0)   AS avg_amount
+         FROM base b
+         LEFT JOIN agg a ON a.day = b.day AND a.asset = b.asset
+         ORDER BY b.day ASC, b.asset`,
+        [from, to],
+      );
+      rows = result.rows;
+    }
+
+    res.json({
+      period: { from: from.toISOString(), to: to.toISOString() },
+      range_days: rangeDays,
+      volume: rows,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+exports.fees = async (req, res, next) => {
+  try {
+    const now = new Date();
+    const defaultFrom = new Date(now);
+    defaultFrom.setDate(defaultFrom.getDate() - 30);
+
+    const from = req.query.from ? new Date(req.query.from) : defaultFrom;
+    const to = req.query.to ? new Date(req.query.to) : now;
+
+    if (isNaN(from.getTime()) || isNaN(to.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format; use ISO 8601 (e.g. YYYY-MM-DD)' });
+    }
+    if (from > to) {
+      return res.status(400).json({ error: 'from must be before or equal to to' });
+    }
+
+    const rangeError = validateDateRange(from, to);
+    if (rangeError) {
+      return res.status(400).json({ error: rangeError });
+    }
+
+    const [totals, byAsset] = await Promise.all([
+      db.query(
+        `SELECT COALESCE(SUM(fee_amount), 0) AS total_fees,
+                COUNT(*) AS transaction_count
+         FROM transactions
+         WHERE created_at >= $1 AND created_at <= $2 AND status = 'completed'`,
+        [from, to],
+      ),
+      db.query(
+        `SELECT asset,
+                COUNT(*) AS transaction_count,
+                COALESCE(SUM(fee_amount), 0) AS total_fees,
+                COALESCE(AVG(fee_amount), 0) AS avg_fee
+         FROM transactions
+         WHERE created_at >= $1 AND created_at <= $2 AND status = 'completed'
+         GROUP BY asset
+         ORDER BY total_fees DESC`,
+        [from, to],
+      ),
+    ]);
+
+    res.json({
+      period: { from: from.toISOString(), to: to.toISOString() },
+      total_fees: totals.rows[0].total_fees,
+      transaction_count: totals.rows[0].transaction_count,
+      by_asset: byAsset.rows,
+    });
+  } catch (err) {
+    next(err);
   }
 };

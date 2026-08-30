@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const db = require('../db');
 const cache = require('../utils/cache');
 const logger = require('../utils/logger');
@@ -38,22 +39,82 @@ function getRequiredFields(anchorInfo, assetCode) {
     .map(([name]) => name);
 }
 
+/**
+ * GET /api/sep31/info
+ *
+ * Returns the supported assets and required SEP-12 fields for cross-border
+ * payments. Conforms to the SEP-31 /info response schema.
+ */
 async function getInfo(req, res, next) {
   try {
     res.json({
-      assets: [
-        {
-          code: 'USDC',
-          issuer: process.env.USDC_ISSUER || 'GBBD47UZQ2BNSE7E2CMPL3XUREV3ZCYY5LMPJCJ7I7ZLIP4UGJLE66V2',
+      receive: {
+        USDC: {
+          enabled: true,
+          min_amount: parseFloat(process.env.SEP31_MIN_AMOUNT || '1'),
+          max_amount: parseFloat(process.env.SEP31_MAX_AMOUNT || '10000'),
+          fee_fixed: parseFloat(process.env.SEP31_FEE_FIXED || '0.5'),
+          fee_percent: parseFloat(process.env.SEP31_FEE_PERCENT || '0'),
           sep12: {
-            sender: ['name', 'email', 'phone_number'],
-            receiver: ['name', 'email', 'phone_number']
+            sender: {
+              types: {
+                'sep31-sender': {
+                  description: 'Sender of a cross-border USDC payment'
+                }
+              }
+            },
+            receiver: {
+              types: {
+                'sep31-receiver': {
+                  description: 'Receiver of a cross-border USDC payment'
+                }
+              }
+            }
+          },
+          fields: {
+            transaction: {
+              receiver_routing_number: {
+                description: 'Routing number of the receiver\'s bank account',
+                optional: true
+              },
+              receiver_account_number: {
+                description: 'Bank account number of the receiver',
+                optional: true
+              },
+              type: {
+                description: 'Type of payment (e.g. SWIFT, ACH, mobile_money)',
+                choices: ['SWIFT', 'ACH', 'mobile_money'],
+                optional: true
+              }
+            }
+          }
+        },
+        XLM: {
+          enabled: true,
+          min_amount: parseFloat(process.env.SEP31_XLM_MIN_AMOUNT || '1'),
+          max_amount: parseFloat(process.env.SEP31_XLM_MAX_AMOUNT || '50000'),
+          fee_fixed: parseFloat(process.env.SEP31_XLM_FEE_FIXED || '0'),
+          fee_percent: parseFloat(process.env.SEP31_XLM_FEE_PERCENT || '0'),
+          sep12: {
+            sender: {
+              types: {
+                'sep31-sender': {
+                  description: 'Sender of a cross-border XLM payment'
+                }
+              }
+            },
+            receiver: {
+              types: {
+                'sep31-receiver': {
+                  description: 'Receiver of a cross-border XLM payment'
+                }
+              }
+            }
+          },
+          fields: {
+            transaction: {}
           }
         }
-      ],
-      sep12: {
-        sender: ['name', 'email', 'phone_number'],
-        receiver: ['name', 'email', 'phone_number']
       }
     });
   } catch (err) {
@@ -61,10 +122,29 @@ async function getInfo(req, res, next) {
   }
 }
 
+/**
+ * POST /api/sep31/transactions
+ *
+ * Initiates a new SEP-31 cross-border payment transaction.
+ * Validates required fields against the anchor's /info schema when reachable.
+ */
 async function createTransaction(req, res, next) {
   try {
     const { amount, asset_code = 'USDC', receiver_account, fields = {}, sender_name, sender_email, callback_url } = req.body;
+    const {
+      amount,
+      asset_code = 'USDC',
+      receiver_account,
+      fields = {},
+      sender_name,
+      sender_email,
+      callback_url,
+    } = req.body;
     const userId = req.user.userId;
+
+    if (callback_url && !validateCallbackUrl(callback_url)) {
+      return res.status(400).json({ error: 'callback_url must be a valid HTTPS URL (no internal addresses)' });
+    }
 
     if (!amount || !receiver_account) {
       return res.status(400).json({ error: 'amount and receiver_account required' });
@@ -84,7 +164,7 @@ async function createTransaction(req, res, next) {
       requiredFields = getRequiredFields(anchorInfo, asset_code);
     } catch (err) {
       logger.warn('Could not fetch anchor /info for field validation', { error: err.message });
-      // Proceed without validation if anchor is unreachable
+      // Proceed without remote validation if anchor is unreachable
     }
 
     if (requiredFields.length > 0) {
@@ -99,6 +179,7 @@ async function createTransaction(req, res, next) {
     const kycVerified = user.rows[0]?.kyc_status === 'verified';
 
     const txId = uuidv4();
+    const sharedSecret = callback_url ? crypto.randomBytes(32).toString('hex') : null;
     await db.query(
       `INSERT INTO sep31_transactions (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status, callback_url)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)`,
@@ -109,27 +190,50 @@ async function createTransaction(req, res, next) {
       // Fire-and-forget: delivery failures are logged, never block the response.
       deliverCallback(callback_url, { transaction_id: txId, status: 'pending' }).catch(() => {});
     }
+      `INSERT INTO sep31_transactions
+         (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status, callback_url, shared_secret)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)`,
+      [txId, userId, receiver_account, amount, asset_code, kycVerified, callback_url || null, sharedSecret]
+    );
+
+    logger.info('SEP-31 transaction created', {
+      txId,
+      userId,
+      asset_code,
+      amount,
+      kyc_verified: kycVerified
+    });
 
     res.status(201).json({
       id: txId,
       status: 'pending',
-      amount,
+      amount: parseFloat(amount),
       asset_code,
       receiver_account,
-      kyc_verified: kycVerified
+      kyc_verified: kycVerified,
+      ...(sharedSecret && { shared_secret: sharedSecret }),
+      sender_name: sender_name || null,
+      sender_email: sender_email || null
     });
   } catch (err) {
     next(err);
   }
 }
 
+/**
+ * GET /api/sep31/transactions/:id
+ *
+ * Returns the current status and details of a SEP-31 transaction.
+ * Only the transaction's sender may retrieve it.
+ */
 async function getTransaction(req, res, next) {
   try {
     const { id } = req.params;
     const userId = req.user.userId;
 
     const result = await db.query(
-      `SELECT id, status, amount, asset_code, receiver_account, kyc_verified, created_at, updated_at
+      `SELECT id, status, status_message, stellar_transaction_id, refunded, amount, asset_code,
+              receiver_account, kyc_verified, callback_url, created_at, updated_at
        FROM sep31_transactions
        WHERE id = $1 AND sender_id = $2`,
       [id, userId]
@@ -139,6 +243,42 @@ async function getTransaction(req, res, next) {
       return res.status(404).json({ error: 'Transaction not found' });
     }
 
+    const callbacks = await db.query(
+      `SELECT url, http_status, response_time_ms, attempt_number, created_at
+       FROM sep31_callbacks WHERE transaction_id = $1 ORDER BY created_at ASC`,
+      [id]
+    );
+
+    res.json({ ...result.rows[0], callback_attempts: callbacks.rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function updateTransactionStatus(req, res, next) {
+  try {
+    const { id } = req.params;
+    const { status, status_message, stellar_transaction_id, refunded } = req.body;
+    const userId = req.user.userId;
+
+    const VALID_STATUSES = ['pending', 'completed', 'error', 'refunded'];
+    if (!VALID_STATUSES.includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const result = await db.query(
+      `UPDATE sep31_transactions
+       SET status = $1, status_message = $2, stellar_transaction_id = $3, refunded = $4, updated_at = NOW()
+       WHERE id = $5 AND sender_id = $6
+       RETURNING *`,
+      [status, status_message || null, stellar_transaction_id || null, refunded || false, id, userId]
+    );
+
+    if (!result.rows[0]) {
+      return res.status(404).json({ error: 'Transaction not found' });
+    }
+
+    deliverCallback(result.rows[0]);
     res.json(result.rows[0]);
   } catch (err) {
     next(err);
@@ -149,6 +289,7 @@ module.exports = {
   getInfo,
   createTransaction,
   getTransaction,
+  updateTransactionStatus,
   fetchAnchorInfo,
   getRequiredFields,
 };

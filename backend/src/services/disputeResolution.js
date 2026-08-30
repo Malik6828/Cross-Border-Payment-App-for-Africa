@@ -11,10 +11,8 @@
  */
 
 const StellarSdk = require("@stellar/stellar-sdk");
-const crypto = require("crypto");
 
-const ALGORITHM = "aes-256-cbc";
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
 const isTestnet = process.env.STELLAR_NETWORK !== "mainnet";
 const networkPassphrase = isTestnet
@@ -34,14 +32,7 @@ function getRpc() {
 }
 
 function decryptSecret(encryptedKey) {
-  const [ivHex, encrypted] = encryptedKey.split(":");
-  const iv = Buffer.from(ivHex, "hex");
-  const decipher = crypto.createDecipheriv(
-    ALGORITHM,
-    Buffer.from(ENCRYPTION_KEY),
-    iv
-  );
-  return decipher.update(encrypted, "hex", "utf8") + decipher.final("utf8");
+  return decryptAesCbc(encryptedKey);
 }
 
 function requireContractId() {
@@ -126,8 +117,9 @@ async function openDispute({ encryptedSecretKey, sender, recipient, amount }) {
 }
 
 /**
- * Submit evidence for an open dispute.
+ * Submit evidence hash for an open dispute.
  * The submitter (sender or recipient) signs the transaction.
+ * Can accept either string evidence (IPFS CID) or hex SHA-256 hash.
  *
  * Returns { txHash }.
  */
@@ -138,14 +130,14 @@ async function submitEvidence({ encryptedSecretKey, disputeId, evidence }) {
   const keypair = StellarSdk.Keypair.fromSecret(secretKey);
   const submitter = keypair.publicKey();
 
-  const evidenceBytes = StellarSdk.xdr.ScVal.scvBytes(
-    Buffer.from(evidence, "utf8")
-  );
+  // Accept hex SHA-256 hash (64 chars) or string evidence (IPFS CID)
+  const isSha256Hash = /^[a-fA-F0-9]{64}$/.test(evidence);
+  const evidenceBuffer = isSha256Hash ? Buffer.from(evidence, "hex") : Buffer.from(evidence, "utf8");
 
   const args = [
     StellarSdk.nativeToScVal(submitter, { type: "address" }),
     StellarSdk.nativeToScVal(BigInt(disputeId), { type: "u64" }),
-    evidenceBytes,
+    StellarSdk.xdr.ScVal.scvBytes(evidenceBuffer),
   ];
 
   const { hash } = await sendAndConfirm(keypair, {

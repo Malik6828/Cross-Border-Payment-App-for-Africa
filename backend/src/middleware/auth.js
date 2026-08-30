@@ -19,7 +19,10 @@ module.exports = function authMiddleware(req, res, next) {
       wallet: maskWalletAddress(req.user.walletAddress),
     });
     next();
-  } catch {
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Token expired', code: 'TOKEN_EXPIRED' });
+    }
     res.status(401).json({ error: 'Invalid or expired token' });
   }
 };

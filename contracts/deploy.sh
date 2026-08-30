@@ -54,20 +54,36 @@ case "$TARGET_CONTRACT" in
     CONTRACT_NAME="recurring_payments_contract"
     CONTRACT_SUBDIR="recurring-payments"
     ;;
-  agent-escrow)
-    CONTRACT_NAME="agent_escrow_contract"
-    CONTRACT_SUBDIR="agent-escrow"
-    ;;
-  kyc-attestation)
-    CONTRACT_NAME="kyc_attestation_contract"
-    CONTRACT_SUBDIR="kyc-attestation"
+  savings-vault)
+    CONTRACT_NAME="savings_vault_contract"
+    CONTRACT_SUBDIR="savings-vault"
     ;;
   fee-distributor)
     CONTRACT_NAME="fee_distributor_contract"
     CONTRACT_SUBDIR="fee-distributor"
     ;;
+  dispute-resolution)
+    CONTRACT_NAME="dispute_resolution_contract"
+    CONTRACT_SUBDIR="dispute-resolution"
+    ;;
+  kyc-attestation)
+    CONTRACT_NAME="kyc_attestation_contract"
+    CONTRACT_SUBDIR="kyc-attestation"
+    ;;
+  agent-escrow)
+    CONTRACT_NAME="agent_escrow_contract"
+    CONTRACT_SUBDIR="agent-escrow"
+    ;;
+  multisig-approval)
+    CONTRACT_NAME="multisig_approval"
+    CONTRACT_SUBDIR="multisig-approval"
+    ;;
+  loyalty-token)
+    CONTRACT_NAME="loyalty_token_contract"
+    CONTRACT_SUBDIR="loyalty-token"
+    ;;
   *)
-    echo -e "${RED}Unknown contract: $TARGET_CONTRACT. Valid options: escrow, recurring-payments, agent-escrow, kyc-attestation, fee-distributor${NC}"
+    echo -e "${RED}Unknown contract: $TARGET_CONTRACT. Valid options: escrow, recurring-payments, savings-vault, fee-distributor, dispute-resolution, kyc-attestation, agent-escrow, multisig-approval, loyalty-token${NC}"
     exit 1
     ;;
 esac
@@ -135,6 +151,13 @@ else
     echo -e "${YELLOW}Note: contract optimize not available, skipping${NC}"
 fi
 
+# Step 3.5: Compute expected WASM hash
+echo -e "\n${YELLOW}Step 3.5: Computing WASM hash...${NC}"
+
+EXPECTED_WASM_HASH=$(sha256sum "$WASM_FILE" | awk '{print $1}')
+echo "Expected WASM hash: $EXPECTED_WASM_HASH"
+echo -e "${GREEN}✓ WASM hash computed${NC}"
+
 # Step 4: Deploy to Stellar Network
 echo -e "\n${YELLOW}Step 4: Deploying to $NETWORK...${NC}"
 
@@ -178,6 +201,31 @@ fi
 echo -e "${GREEN}✓ Contract deployed successfully${NC}"
 echo "Contract ID: $CONTRACT_ID"
 
+# Step 4.5: Verify WASM hash
+echo -e "\n${YELLOW}Step 4.5: Verifying WASM hash...${NC}"
+
+# Fetch the contract's ledger entry to get the WASM hash
+DEPLOYED_WASM_HASH=$($SOROBAN_CLI contract info --id "$CONTRACT_ID" --network "$NETWORK" 2>/dev/null | grep -i "wasm_hash\|hash" | head -1 | awk -F': ' '{print $2}' || true)
+
+if [ -z "$DEPLOYED_WASM_HASH" ]; then
+    echo -e "${YELLOW}Note: Could not fetch deployed WASM hash from network. Verify manually.${NC}"
+    echo "Expected WASM hash: $EXPECTED_WASM_HASH"
+else
+    # Normalize hashes (remove 0x prefix if present and convert to lowercase)
+    EXPECTED_NORMALIZED=$(echo "$EXPECTED_WASM_HASH" | tr '[:upper:]' '[:lower:]' | sed 's/^0x//')
+    DEPLOYED_NORMALIZED=$(echo "$DEPLOYED_WASM_HASH" | tr '[:upper:]' '[:lower:]' | sed 's/^0x//')
+    
+    if [ "$EXPECTED_NORMALIZED" = "$DEPLOYED_NORMALIZED" ]; then
+        echo -e "${GREEN}✓ WASM hash verified: $EXPECTED_WASM_HASH${NC}"
+    else
+        echo -e "${RED}Error: WASM hash mismatch!${NC}"
+        echo "Expected: $EXPECTED_NORMALIZED"
+        echo "Deployed: $DEPLOYED_NORMALIZED"
+        echo "This may indicate a supply chain attack or compilation issue."
+        exit 1
+    fi
+fi
+
 # Step 5: Save deployment info
 echo -e "\n${YELLOW}Step 5: Saving deployment info...${NC}"
 
@@ -191,14 +239,19 @@ cat > "$DEPLOYMENT_FILE" << EOF
   "deployed_at": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
   "rpc_host": "$SOROBAN_RPC_HOST",
   "network_passphrase": "$SOROBAN_NETWORK_PASSPHRASE",
-  "wasm_hash": "$(sha256sum "$WASM_FILE" | awk '{print $1}')"
+  "wasm_hash": "$EXPECTED_WASM_HASH"
 }
 EOF
 
 echo -e "${GREEN}✓ Deployment info saved to $DEPLOYMENT_FILE${NC}"
 
-# Step 5b: Write contract ID to .deployed_ids.env for backend configuration
-DEPLOYED_IDS_FILE="${CONTRACT_DIR}/.deployed_ids.env"
+# Step 5a: Store expected WASM hash for future verification
+EXPECTED_HASH_FILE="${CONTRACT_DIR}/${CONTRACT_SUBDIR}/expected_hash.txt"
+echo "$EXPECTED_WASM_HASH" > "$EXPECTED_HASH_FILE"
+echo -e "${GREEN}✓ Expected WASM hash stored to $EXPECTED_HASH_FILE${NC}"
+
+# Step 5b: Write contract ID to contracts/.env so the backend can load it as an env var
+DEPLOYED_IDS_FILE="${CONTRACT_DIR}/.env"
 
 # Derive the env var name from the contract name (uppercase + _CONTRACT_ID)
 ENV_VAR_NAME=$(echo "${TARGET_CONTRACT}" | tr '[:lower:]-' '[:upper:]_')_CONTRACT_ID
@@ -212,8 +265,164 @@ fi
 
 echo -e "${GREEN}✓ Contract ID written to $DEPLOYED_IDS_FILE${NC}"
 
-# Step 6: Output Stellar Explorer link
-echo -e "\n${YELLOW}Step 6: Verification${NC}"
+# Step 6 (security — fix #336): Initialize immediately after deployment.
+# Eliminates the front-running window: anyone who calls initialize() first
+# becomes admin. We call it here so there is no manual gap.
+echo -e "\n${YELLOW}Step 6: Initializing contract (front-running prevention — fix #336)...${NC}"
+
+INIT_OK=false
+
+case "$TARGET_CONTRACT" in
+  escrow|fee-distributor)
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${USDC_ADDRESS:-}" ]; then
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" \
+            --usdc_address "$USDC_ADDRESS"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS and USDC_ADDRESS, then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --usdc_address \$USDC_ADDRESS"
+    fi
+    ;;
+  savings-vault)
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${USDC_ADDRESS:-}" ]; then
+        PENALTY="${PENALTY_BPS:-1000}"
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" \
+            --token_address "$USDC_ADDRESS" \
+            --penalty_bps "$PENALTY"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS, USDC_ADDRESS, and optionally PENALTY_BPS (default 1000), then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --token_address \$USDC_ADDRESS --penalty_bps \${PENALTY_BPS:-1000}"
+    fi
+    ;;
+  recurring-payments)
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${USDC_ADDRESS:-}" ]; then
+        FEE="${FEE_BPS:-0}"
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" \
+            --token_address "$USDC_ADDRESS" \
+            --fee_bps "$FEE"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS and USDC_ADDRESS (and optionally FEE_BPS, default 0), then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --token_address \$USDC_ADDRESS --fee_bps \${FEE_BPS:-0}"
+    fi
+    ;;
+  kyc-attestation)
+    if [ -n "${ADMIN_ADDRESS:-}" ]; then
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS, then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS"
+    fi
+    ;;
+  agent-escrow)
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${USDC_ADDRESS:-}" ]; then
+        CANCEL_WINDOW="${CANCEL_WINDOW_SECONDS:-86400}"
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" \
+            --usdc_address "$USDC_ADDRESS" \
+            --cancel_window_seconds "$CANCEL_WINDOW"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS, USDC_ADDRESS, and optionally CANCEL_WINDOW_SECONDS (default 86400), then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --usdc_address \$USDC_ADDRESS --cancel_window_seconds \${CANCEL_WINDOW_SECONDS:-86400}"
+    fi
+    ;;
+  dispute-resolution)
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${ARBITRATOR_ADDRESS:-}" ] && [ -n "${USDC_ADDRESS:-}" ]; then
+        MAX_EVIDENCE="${MAX_EVIDENCE_BYTES:-65536}"
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" \
+            --arbitrator "$ARBITRATOR_ADDRESS" \
+            --usdc_address "$USDC_ADDRESS" \
+            --max_evidence_bytes "$MAX_EVIDENCE"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS, ARBITRATOR_ADDRESS, USDC_ADDRESS, and optionally MAX_EVIDENCE_BYTES (default 65536), then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --arbitrator \$ARBITRATOR_ADDRESS --usdc_address \$USDC_ADDRESS --max_evidence_bytes \${MAX_EVIDENCE_BYTES:-65536}"
+    fi
+    ;;
+  multisig-approval)
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${APPROVERS:-}" ] && [ -n "${QUORUM:-}" ]; then
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" \
+            --approvers "$APPROVERS" \
+            --quorum "$QUORUM"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS, APPROVERS (JSON array of addresses), and QUORUM, then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --approvers \$APPROVERS --quorum \$QUORUM"
+    fi
+    ;;
+  loyalty-token)
+    if [ -n "${ADMIN_ADDRESS:-}" ] && [ -n "${MAX_SUPPLY:-}" ]; then
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- initialize \
+            --admin "$ADMIN_ADDRESS" \
+            --max_supply "$MAX_SUPPLY"
+        INIT_OK=true
+    else
+        echo -e "${RED}WARNING: Set ADMIN_ADDRESS and MAX_SUPPLY, then run:${NC}"
+        echo "  $SOROBAN_CLI contract invoke --id $CONTRACT_ID --source \$SOROBAN_SECRET_KEY --network $NETWORK -- initialize --admin \$ADMIN_ADDRESS --max_supply \$MAX_SUPPLY"
+    fi
+    ;;
+esac
+
+if [ "$INIT_OK" = true ]; then
+    echo -e "${GREEN}✓ Contract initialized. Admin: ${ADMIN_ADDRESS:-N/A}${NC}"
+
+    if [ "$TARGET_CONTRACT" = "escrow" ] && [ -n "${ADMIN_ADDRESS:-}" ]; then
+        echo -e "\n${YELLOW}Step 6a: Running escrow migration hook...${NC}"
+        $SOROBAN_CLI contract invoke \
+            --id "$CONTRACT_ID" \
+            --source "$SOROBAN_SECRET_KEY" \
+            --network "$NETWORK" \
+            -- migrate \
+            --admin "$ADMIN_ADDRESS"
+        echo -e "${GREEN}✓ Escrow migration hook executed${NC}"
+    fi
+else
+    echo -e "${RED}Do not share this contract ID until initialize() has been called.${NC}"
+fi
+
+# Step 7: Output Stellar Explorer link
+echo -e "\n${YELLOW}Step 7: Verification${NC}"
 
 if [ "$NETWORK" = "mainnet" ]; then
     EXPLORER_URL="https://stellar.expert/explorer/public/contract/$CONTRACT_ID"
@@ -229,10 +438,11 @@ echo "  Contract ID: $CONTRACT_ID"
 echo "  View on Stellar Expert: $EXPLORER_URL"
 echo ""
 echo -e "${YELLOW}Post-Deployment Checklist:${NC}"
-echo "  1. Source the deployed IDs into your backend .env:"
-echo "       cat contracts/.deployed_ids.env >> backend/.env"
+echo "  1. Load the deployed contract IDs into your backend:"
+echo "       cp contracts/.env backend/.env"
+echo "     Or append: cat contracts/.env >> backend/.env"
 echo "     Or manually copy: ${ENV_VAR_NAME}=${CONTRACT_ID}"
-echo "  2. Call initialize() with admin address and USDC contract address"
+echo "  2. initialize() was called automatically in Step 6 (if ADMIN_ADDRESS/USDC_ADDRESS were set)"
 echo "  3. Restart the backend service to pick up the new contract ID"
 echo "  4. Verify the contract on Stellar Expert: $EXPLORER_URL"
 echo ""

@@ -6,6 +6,6 @@ const router = express.Router();
 
 router.post('/', auth, create);
 router.get('/:id', getById);
-router.post('/:id/claim', markClaimed);
+router.post('/:id/claim', auth, markClaimed);
 
 module.exports = router;

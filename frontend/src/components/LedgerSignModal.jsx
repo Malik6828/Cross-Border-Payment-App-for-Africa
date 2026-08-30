@@ -14,6 +14,27 @@ import toast from 'react-hot-toast';
  * @param {string} networkPassphrase - Stellar network passphrase
  * @param {function} onSigned - Callback with signed XDR
  */
+const LEDGER_ERROR_MAP = {
+  '0x6985': 'Transaction was rejected on your Ledger device.',
+  '0x6982': 'Your Ledger device is locked. Please unlock it and try again.',
+  '0x6700': 'Invalid data received. Make sure the Stellar app is open on your device.',
+  '0x6a80': 'Invalid data. Make sure the Stellar app is up to date.',
+  '0x6b00': 'Wrong parameters. Reconnect your Ledger and try again.',
+  '0x6d00': 'Stellar app is not open on your Ledger device. Open it and try again.',
+  '0x6e00': 'Unsupported command. Make sure the Stellar app is up to date.',
+  '0x6f00': 'Unknown error from Ledger device. Reconnect and try again.',
+  '0x6511': 'Device memory exhausted. Close other apps on your Ledger.',
+};
+
+function mapLedgerError(err) {
+  const msg = err.message || '';
+  if (msg.includes('denied by user')) return LEDGER_ERROR_MAP['0x6985'];
+  if (msg.includes('locked')) return LEDGER_ERROR_MAP['0x6982'];
+  const match = msg.match(/0x[0-9a-fA-F]{4}/);
+  if (match && LEDGER_ERROR_MAP[match[0]]) return LEDGER_ERROR_MAP[match[0]];
+  return 'Failed to sign with Ledger. Ensure the Stellar app is open and try again.';
+}
+
 export default function LedgerSignModal({ show, onClose, xdr, networkPassphrase, onSigned }) {
   const [signing, setSigning] = useState(false);
 
@@ -22,17 +43,14 @@ export default function LedgerSignModal({ show, onClose, xdr, networkPassphrase,
   const handleSign = async () => {
     setSigning(true);
     try {
-      // Connect to Ledger via WebUSB
       const transport = await TransportWebUSB.create();
       const str = new Str(transport);
 
-      // Sign the transaction
       const { signature } = await str.signTransaction(
-        "44'/148'/0'", // Default Stellar derivation path
+        "44'/148'/0'",
         Buffer.from(xdr, 'base64')
       );
 
-      // Attach signature to the transaction
       const StellarSdk = await import('@stellar/stellar-sdk');
       const tx = StellarSdk.TransactionBuilder.fromXDR(xdr, networkPassphrase);
       const keypair = StellarSdk.Keypair.fromPublicKey(signature.publicKey);
@@ -45,13 +63,7 @@ export default function LedgerSignModal({ show, onClose, xdr, networkPassphrase,
       toast.success('Transaction signed with Ledger');
     } catch (err) {
       console.error('Ledger signing error:', err);
-      if (err.message.includes('denied')) {
-        toast.error('Transaction rejected on Ledger');
-      } else if (err.message.includes('locked')) {
-        toast.error('Ledger is locked. Please unlock it and try again.');
-      } else {
-        toast.error('Failed to sign with Ledger. Ensure the Stellar app is open.');
-      }
+      toast.error(mapLedgerError(err));
     } finally {
       setSigning(false);
     }

@@ -6,23 +6,24 @@ const { createWallet, encryptPrivateKey, addTrustline } = require('../services/s
 const audit = require('../services/audit');
 const logger = require('../utils/logger');
 const { hashPIN, comparePIN, validatePIN } = require('../services/pin');
-const { sendVerificationEmail } = require('../services/email');
-const logger = require('../utils/logger');
-const { sendVerificationEmail, sendPasswordResetEmail } = require('../services/email');
-const { generateSecret, verifyToken, generateBackupCodes, useBackupCode } = require('../services/twofa');
+const { sendVerificationEmail, sendPasswordResetEmail, sendBackupCodeWarningEmail, sendEmailChangeRequestedNotice } = require('../services/email');
+const { generateSecret, verifyToken, generateBackupCodes, useBackupCode, hashBackupCode, verifyBackupCode } = require('../services/twofa');
 const {
   COOKIE_NAME,
   COOKIE_OPTIONS,
   signAccessToken,
   generateRefreshToken,
   refreshTokenExpiresAt,
+  signDeviceToken,
+  verifyDeviceToken,
 } = require('../utils/tokens');
+const { setCsrfCookie } = require('../middleware/csrf');
+const cache = require('../utils/cache');
 
-const TOKEN_TTL_MS = 96 * 60 * 60 * 1000; // 96 hours
 const { sendOTP } = require('../services/sms');
-const { recordSession } = require('./sessionController');
+const { recordSession, invalidateOtherSessions } = require('./sessionController');
 
-const TOKEN_TTL_MS = 96 * 60 * 60 * 1000;
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — email verification tokens
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const PHONE_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -123,17 +124,27 @@ async function register(req, res, next) {
     const { raw: otpRaw, hashed: otpHashed } = phone ? generatePhoneOTP() : { raw: null, hashed: null };
     const otpExpiresAt = phone ? new Date(Date.now() + PHONE_OTP_TTL_MS) : null;
 
-    await db.query('BEGIN');
-    await db.query(
-      `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
-       VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
-      [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
-    );
-    await db.query(
-      `INSERT INTO wallets (id, user_id, public_key, encrypted_secret_key) VALUES ($1,$2,$3,$4)`,
-      [uuidv4(), userId, publicKey, encryptedSecretKey]
-    );
-    await db.query('COMMIT');
+    // Acquire a dedicated client so BEGIN/COMMIT are scoped to a single connection.
+    // If the wallet INSERT fails the ROLLBACK will undo the user INSERT too.
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `INSERT INTO users (id, full_name, email, password_hash, phone, email_verified, verification_token, token_expires_at, phone_verified, phone_otp_hash, phone_otp_expires_at)
+         VALUES ($1,$2,$3,$4,$5,FALSE,$6,$7,FALSE,$8,$9)`,
+        [userId, full_name, email, passwordHash, phone || null, hashed, expiresAt, otpHashed, otpExpiresAt]
+      );
+      await client.query(
+        `INSERT INTO wallets (id, user_id, public_key, encrypted_secret_key) VALUES ($1,$2,$3,$4)`,
+        [uuidv4(), userId, publicKey, encryptedSecretKey]
+      );
+      await client.query('COMMIT');
+    } catch (clientErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw clientErr;
+    } finally {
+      client.release();
+    }
 
     // Auto-add USDC trustline so new accounts can receive USDC immediately
     let trustline_status = 'skipped';
@@ -150,7 +161,6 @@ async function register(req, res, next) {
 
     await sendVerificationEmail(email, raw);
 
-    res.status(201).json({ message: 'Account created. Please verify your email before logging in.' });
     if (phone && otpRaw) {
       sendOTP(phone, otpRaw).catch(e => logger.warn('Registration OTP SMS failed', { error: e.message }));
     }
@@ -159,17 +169,19 @@ async function register(req, res, next) {
       trustline_status,
     });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
     next(err);
   }
 }
 
 async function login(req, res, next) {
   try {
-    const { email, password, totp_code } = req.body;
+    const { email, password, totp_code, rememberDevice } = req.body;
+    const incomingDeviceToken = req.headers['x-device-token'];
 
     const result = await db.query(
-      `SELECT u.id, u.full_name, u.email, u.password_hash, u.email_verified, u.role, u.totp_enabled, u.totp_secret, u.failed_login_attempts, u.locked_until, u.last_failed_attempt_at, w.public_key
+      `SELECT u.id, u.full_name, u.email, u.password_hash, u.email_verified, u.role,
+              u.totp_enabled, u.totp_secret, u.failed_login_attempts, u.locked_until,
+              u.last_failed_attempt_at, w.public_key
        FROM users u LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.email = $1`,
       [email]
@@ -190,8 +202,7 @@ async function login(req, res, next) {
           locked_until: lockUntil.toISOString(),
         });
       }
-
-      // Lock has expired, reset attempt counters
+      // Lock has expired — reset counters
       await db.query(
         `UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_failed_attempt_at = NULL WHERE id = $1`,
         [user.id]
@@ -204,29 +215,21 @@ async function login(req, res, next) {
     // Verify password
     const isValidPassword = user && (await bcrypt.compare(password, user.password_hash));
     if (!user || !isValidPassword) {
-      // Invalid credentials - increment failed attempts for existing users
       if (user) {
         const lastAttempt = user.last_failed_attempt_at ? new Date(user.last_failed_attempt_at) : null;
-        const now = new Date();
         const ATTEMPT_WINDOW_MS = ATTEMPT_WINDOW_MINUTES * 60 * 1000;
-
         let failedAttempts = user.failed_login_attempts || 0;
 
-        // If the last attempt was outside the 15-minute window, reset the counter
         if (lastAttempt && (now - lastAttempt) > ATTEMPT_WINDOW_MS) {
           failedAttempts = 0;
         }
-
-        // Increment failed attempts
         failedAttempts++;
-        const nowTimestamp = now;
 
-        // Check if we should lock the account
         if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
-          const lockedUntil = new Date(now + (LOCKOUT_DURATION_MINUTES * 60 * 1000));
+          const lockedUntil = new Date(now.getTime() + LOCKOUT_DURATION_MINUTES * 60 * 1000);
           await db.query(
             `UPDATE users SET failed_login_attempts = $1, locked_until = $2, last_failed_attempt_at = $3 WHERE id = $4`,
-            [failedAttempts, lockedUntil, nowTimestamp, user.id]
+            [failedAttempts, lockedUntil, now, user.id]
           );
           audit.log(user.id, 'account_locked', req.ip, req.headers['user-agent'], {
             reason: 'excessive_failed_login_attempts',
@@ -239,56 +242,75 @@ async function login(req, res, next) {
           });
         }
 
-        // Update attempt counter and timestamp
         await db.query(
           `UPDATE users SET failed_login_attempts = $1, last_failed_attempt_at = $2 WHERE id = $3`,
-          [failedAttempts, nowTimestamp, user.id]
+          [failedAttempts, now, user.id]
         );
         audit.log(user.id, 'login_failure', req.ip, req.headers['user-agent'], {
           failed_attempts: failedAttempts,
           attempts_remaining: MAX_FAILED_ATTEMPTS - failedAttempts,
         });
       }
-
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    // Password is valid
     if (!user.email_verified) {
       return res.status(403).json({ error: 'Please verify your email before logging in.' });
     }
 
-    // Short-lived access token
-    const token = signAccessToken({ userId: user.id, email: user.email, role: user.role });
-
-    // Refresh token — store only the hash, seed a new family
-    const { raw, hash } = generateRefreshToken();
-    const familyId = uuidv4();
-    await db.query(
-      `INSERT INTO refresh_tokens (id, user_id, token_hash, family_id, revoked, expires_at)
-       VALUES ($1, $2, $3, $4, FALSE, $5)`,
-      [uuidv4(), user.id, hash, familyId, refreshTokenExpiresAt()]
-    );
-
-    res.cookie(COOKIE_NAME, raw, COOKIE_OPTIONS);
     // Check if 2FA is enabled
     if (user.totp_enabled) {
-      if (!totp_code) {
+      const { totp_code: totpCode, backup_code } = req.body;
+      if (!totpCode && !backup_code) {
         return res.status(403).json({ error: 'TOTP code required', requires_2fa: true });
       }
 
-      const isValid = verifyToken(user.totp_secret, totp_code);
-      if (!isValid) {
-        return res.status(401).json({ error: 'Invalid TOTP code' });
+      if (backup_code) {
+        const codes = await db.query(
+          `SELECT id, code_hash FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`,
+          [user.id]
+        );
+        let matchedId = null;
+        for (const row of codes.rows) {
+          if (await verifyBackupCode(backup_code, row.code_hash)) {
+            matchedId = row.id;
+            break;
+          }
+        }
+        if (!matchedId) {
+          return res.status(401).json({ error: 'BACKUP_CODE_USED' });
+        }
+        await db.query(`UPDATE totp_backup_codes SET used_at = NOW() WHERE id = $1`, [matchedId]);
+        const remaining = await db.query(
+          `SELECT COUNT(*) AS count FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`,
+          [user.id]
+        );
+        if (parseInt(remaining.rows[0].count, 10) < 3) {
+          const emailRow = await db.query('SELECT email FROM users WHERE id = $1', [user.id]);
+          sendBackupCodeWarningEmail(emailRow.rows[0].email, parseInt(remaining.rows[0].count, 10)).catch(() => {});
+        }
+      } else {
+        // Device trust token allows skipping TOTP on a previously trusted device.
+        let deviceTrusted = false;
+        if (incomingDeviceToken) {
+          try {
+            const payload = verifyDeviceToken(incomingDeviceToken);
+            deviceTrusted = String(payload.userId) === String(user.id);
+          } catch { /* expired or invalid — require TOTP */ }
+        }
+        if (!deviceTrusted && !verifyToken(user.totp_secret, totpCode)) {
+          return res.status(401).json({ error: 'Invalid TOTP code' });
+        }
       }
     }
 
-    // Successful login - reset attempt counters
+    // Successful login — reset attempt counters
     await db.query(
       `UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_failed_attempt_at = NULL WHERE id = $1`,
       [user.id]
     );
 
+    // Issue short-lived access token
     const token = signAccessToken({ userId: user.id, email: user.email, role: user.role });
 
     // Issue refresh token — store only the hash in DB, seed a new family
@@ -305,7 +327,10 @@ async function login(req, res, next) {
     // Record session for remote logout support
     await recordSession(user.id, token, req).catch(() => {});
 
+    const device_token = rememberDevice ? signDeviceToken({ userId: user.id }) : undefined;
+
     res.cookie(COOKIE_NAME, raw, COOKIE_OPTIONS);
+    setCsrfCookie(res);
     audit.log(user.id, 'login_success', req.ip, req.headers['user-agent']);
     res.json({
       token,
@@ -316,70 +341,8 @@ async function login(req, res, next) {
         wallet_address: user.public_key,
         phone_verified: user.phone_verified,
       },
+      ...(device_token && { device_token }),
     });
-  } catch (err) {
-    next(err);
-  }
-}
-
-async function refresh(req, res, next) {
-  try {
-    const raw = req.cookies?.[COOKIE_NAME];
-    if (!raw) return res.status(401).json({ error: 'No refresh token' });
-
-    const hash = crypto.createHash('sha256').update(raw).digest('hex');
-
-    // Look up the token (active or revoked — we need both cases)
-    const result = await db.query(
-      `SELECT rt.id, rt.user_id, rt.expires_at, rt.family_id, rt.revoked,
-              u.email, u.role
-       FROM refresh_tokens rt
-       JOIN users u ON u.id = rt.user_id
-       WHERE rt.token_hash = $1`,
-      [hash]
-    );
-
-    const record = result.rows[0];
-
-    if (!record) {
-      // Hash not in DB at all — could be a completely bogus token, or a token
-      // from a family that was already fully wiped by a prior reuse detection.
-      return res.status(401).json({ error: 'Invalid refresh token' });
-    }
-
-    if (record.revoked) {
-      // Token was already rotated — this is a reuse attack.
-      // Invalidate the entire family and force re-login.
-      await db.query('DELETE FROM refresh_tokens WHERE family_id = $1', [record.family_id]);
-      logger.warn('refresh_token_reuse detected — family invalidated', {
-        event:     'refresh_token_reuse',
-        family_id: record.family_id,
-        user_id:   record.user_id,
-      });
-      res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
-      return res.status(401).json({ error: 'Refresh token reuse detected. Please log in again.' });
-    }
-
-    if (new Date(record.expires_at) < new Date()) {
-      await db.query('DELETE FROM refresh_tokens WHERE id = $1', [record.id]);
-      res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
-      return res.status(401).json({ error: 'Refresh token expired' });
-    }
-
-    // Valid — rotate: mark old token revoked (kept for reuse detection), issue new one
-    const { raw: newRaw, hash: newHash } = generateRefreshToken();
-
-    await db.query('UPDATE refresh_tokens SET revoked = TRUE WHERE id = $1', [record.id]);
-    await db.query(
-      `INSERT INTO refresh_tokens (id, user_id, token_hash, family_id, revoked, expires_at)
-       VALUES ($1, $2, $3, $4, FALSE, $5)`,
-      [uuidv4(), record.user_id, newHash, record.family_id, refreshTokenExpiresAt()]
-    );
-
-    const token = signAccessToken({ userId: record.user_id, email: record.email, role: record.role });
-
-    res.cookie(COOKIE_NAME, newRaw, COOKIE_OPTIONS);
-    res.json({ token });
   } catch (err) {
     next(err);
   }
@@ -392,11 +355,16 @@ async function logout(req, res, next) {
       const hash = crypto.createHash('sha256').update(raw).digest('hex');
       // Delete the whole family so all sessions on this device are cleared
       const found = await db.query(
-        'SELECT family_id FROM refresh_tokens WHERE token_hash = $1',
+        'SELECT family_id, expires_at FROM refresh_tokens WHERE token_hash = $1',
         [hash]
       );
       if (found.rows[0]) {
         await db.query('DELETE FROM refresh_tokens WHERE family_id = $1', [found.rows[0].family_id]);
+        // Blacklist in Redis so in-flight refresh attempts are rejected immediately
+        const ttlSeconds = Math.max(0, Math.floor((new Date(found.rows[0].expires_at) - Date.now()) / 1000));
+        if (ttlSeconds > 0) {
+          await cache.set(`blacklist:rt:${hash}`, '1', ttlSeconds);
+        }
       }
     }
     res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
@@ -473,7 +441,7 @@ async function verifyPhone(req, res, next) {
 async function getMe(req, res, next) {
   try {
     const result = await db.query(
-      `SELECT u.id, u.full_name, u.email, u.phone, u.phone_verified, u.pin_setup_completed, u.totp_enabled, u.account_type, w.public_key
+      `SELECT u.id, u.full_name, u.email, u.email_verified, u.phone, u.phone_verified, u.pin_setup_completed, u.totp_enabled, u.account_type, u.avatar_url, w.public_key
        FROM users u LEFT JOIN wallets w ON w.user_id = u.id
        WHERE u.id = $1`,
       [req.user.userId]
@@ -484,12 +452,14 @@ async function getMe(req, res, next) {
       id: u.id,
       full_name: u.full_name,
       email: u.email,
+      email_verified: u.email_verified,
       phone: u.phone,
       phone_verified: u.phone_verified,
       wallet_address: u.public_key,
       pin_setup_completed: u.pin_setup_completed,
       totp_enabled: u.totp_enabled,
       account_type: u.account_type,
+      avatar_url: u.avatar_url || null,
     });
   } catch (err) {
     next(err);
@@ -502,7 +472,7 @@ async function setup2FA(req, res, next) {
     const user = await db.query('SELECT email FROM users WHERE id = $1', [userId]);
     if (!user.rows[0]) return res.status(404).json({ error: 'User not found' });
 
-    const { secret, qrCode } = await generateSecret(user.rows[0].email);
+    const { secret, qrCode, otpauthUri } = await generateSecret(user.rows[0].email);
     const backupCodes = generateBackupCodes();
 
     // Store temporarily (not enabled yet)
@@ -511,7 +481,7 @@ async function setup2FA(req, res, next) {
       [secret, backupCodes, userId]
     );
 
-    res.json({ qrCode, backupCodes, secret });
+    res.json({ qrCode, backupCodes, secret, otpauthUri });
   } catch (err) {
     next(err);
   }
@@ -532,13 +502,63 @@ async function verify2FA(req, res, next) {
       return res.status(401).json({ error: 'Invalid TOTP code' });
     }
 
-    await db.query(
-      `UPDATE users SET totp_enabled = TRUE WHERE id = $1`,
-      [userId]
-    );
+    await db.query(`UPDATE users SET totp_enabled = TRUE WHERE id = $1`, [userId]);
+
+    const rawCodes = generateBackupCodes(10);
+    await db.query(`DELETE FROM totp_backup_codes WHERE user_id = $1`, [userId]);
+    for (const code of rawCodes) {
+      const hash = await hashBackupCode(code);
+      await db.query(
+        `INSERT INTO totp_backup_codes (user_id, code_hash) VALUES ($1, $2)`,
+        [userId, hash]
+      );
+    }
 
     audit.log(userId, '2fa_enabled', req.ip, req.headers['user-agent']);
-    res.json({ message: '2FA enabled successfully' });
+    res.json({ message: '2FA enabled successfully', backup_codes: rawCodes });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function regenerateBackupCodes(req, res, next) {
+  try {
+    const { totp_code } = req.body;
+    const userId = req.user.userId;
+
+    const user = await db.query('SELECT totp_secret, totp_enabled FROM users WHERE id = $1', [userId]);
+    if (!user.rows[0]?.totp_enabled) {
+      return res.status(400).json({ error: '2FA is not enabled' });
+    }
+    if (!verifyToken(user.rows[0].totp_secret, totp_code)) {
+      return res.status(401).json({ error: 'Invalid TOTP code' });
+    }
+
+    const rawCodes = generateBackupCodes(10);
+    await db.query(`DELETE FROM totp_backup_codes WHERE user_id = $1`, [userId]);
+    for (const code of rawCodes) {
+      const hash = await hashBackupCode(code);
+      await db.query(
+        `INSERT INTO totp_backup_codes (user_id, code_hash) VALUES ($1, $2)`,
+        [userId, hash]
+      );
+    }
+
+    audit.log(userId, '2fa_backup_codes_regenerated', req.ip, req.headers['user-agent']);
+    res.json({ backup_codes: rawCodes });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getBackupCodeCount(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const result = await db.query(
+      `SELECT COUNT(*) AS count FROM totp_backup_codes WHERE user_id = $1 AND used_at IS NULL`,
+      [userId]
+    );
+    res.json({ remaining: parseInt(result.rows[0].count, 10) });
   } catch (err) {
     next(err);
   }
@@ -580,10 +600,6 @@ async function setPIN(req, res, next) {
       `UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`,
       [pinHash, userId]
     );
-    await db.query(`UPDATE users SET pin_hash = $1, pin_setup_completed = true WHERE id = $2`, [
-      pinHash,
-      userId,
-    ]);
 
     res.json({ message: 'PIN set successfully' });
   } catch (err) {
@@ -601,12 +617,6 @@ async function verifyPIN(req, res, next) {
 
     const { pin_hash } = result.rows[0];
 
-    if (!result.rows[0]) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const { pin_hash } = result.rows[0];
-
     if (!pin_hash) {
       return res.status(400).json({ error: 'PIN not configured. Please set up a PIN first.' });
     }
@@ -620,13 +630,20 @@ async function verifyPIN(req, res, next) {
   }
 }
 
-module.exports = { register, login, refresh, logout, verifyEmail, getMe, setPIN, verifyPIN };
 async function refresh(req, res, next) {
   try {
     const raw = req.cookies?.[COOKIE_NAME];
     if (!raw) return res.status(401).json({ error: 'No refresh token' });
 
     const hash = crypto.createHash('sha256').update(raw).digest('hex');
+
+    // Fast-path: check Redis blacklist before hitting the database
+    const blacklisted = await cache.get(`blacklist:rt:${hash}`);
+    if (blacklisted) {
+      logger.warn('refresh_token_blacklisted — Redis fast-reject', { event: 'refresh_token_blacklisted' });
+      res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
+      return res.status(401).json({ error: 'Refresh token has been revoked. Please log in again.' });
+    }
 
     // Look up the token — active (not revoked) and not expired
     const result = await db.query(
@@ -706,6 +723,12 @@ async function refresh(req, res, next) {
       [uuidv4(), record.user_id, newHash, expiresAt, record.family_id]
     );
 
+    // Blacklist old token in Redis (TTL = remaining valid time before it would have expired)
+    const oldTtlSeconds = Math.max(0, Math.floor((new Date(record.expires_at) - Date.now()) / 1000));
+    if (oldTtlSeconds > 0) {
+      await cache.set(`blacklist:rt:${hash}`, '1', oldTtlSeconds);
+    }
+
     const token = signAccessToken({
       userId: record.user_id,
       email: record.email,
@@ -713,25 +736,13 @@ async function refresh(req, res, next) {
     });
 
     res.cookie(COOKIE_NAME, newRaw, COOKIE_OPTIONS);
+    setCsrfCookie(res);
     res.json({ token });
   } catch (err) {
     next(err);
   }
 }
 
-async function logout(req, res, next) {
-  try {
-    const raw = req.cookies?.[COOKIE_NAME];
-    if (raw) {
-      const hash = crypto.createHash('sha256').update(raw).digest('hex');
-      await db.query('DELETE FROM refresh_tokens WHERE token_hash = $1', [hash]);
-    }
-    res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTIONS, maxAge: undefined });
-    res.json({ message: 'Logged out successfully' });
-  } catch (err) {
-    next(err);
-  }
-}
 
 async function forgotPassword(req, res, next) {
   try {
@@ -785,20 +796,53 @@ async function resetPassword(req, res, next) {
     const { user_id: userId } = found.rows[0];
     const passwordHash = await bcrypt.hash(password, 12);
 
-    await db.query('BEGIN');
-    await db.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, userId]);
-    await db.query(
-      `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
-      [userId]
-    );
-    await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
-    await db.query('COMMIT');
+    // Acquire a dedicated client so the three writes are atomic — if any step
+    // fails, ROLLBACK undoes all prior changes within this transaction.
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`UPDATE users SET password_hash = $1 WHERE id = $2`, [passwordHash, userId]);
+      await client.query(
+        `UPDATE password_reset_tokens SET used_at = NOW() WHERE user_id = $1 AND used_at IS NULL`,
+        [userId]
+      );
+      await client.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
+      await client.query('COMMIT');
+    } catch (clientErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw clientErr;
+    } finally {
+      client.release();
+    }
 
     audit.log(userId, 'password_change', req.ip, req.headers['user-agent']);
     audit.log(userId, 'password_reset_sessions_invalidated', req.ip, req.headers['user-agent']);
     res.json({ message: 'Password has been reset. You can now log in.' });
   } catch (err) {
-    await db.query('ROLLBACK').catch(() => {});
+    next(err);
+  }
+}
+
+async function validateResetToken(req, res, next) {
+  try {
+    const { token } = req.query;
+    if (!token) {
+      return res.status(400).json({ error: 'Token is required' });
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const found = await db.query(
+      `SELECT expires_at FROM password_reset_tokens
+       WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()`,
+      [tokenHash]
+    );
+
+    if (found.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid or expired reset token' });
+    }
+
+    res.json({ expires_at: found.rows[0].expires_at });
+  } catch (err) {
     next(err);
   }
 }
@@ -847,6 +891,68 @@ async function updateProfile(req, res, next) {
   }
 }
 
+async function changeEmail(req, res, next) {
+  try {
+    const { new_email, password } = req.body;
+    const userId = req.user.userId;
+
+    const result = await db.query('SELECT password_hash, email FROM users WHERE id = $1', [userId]);
+    const user = result.rows[0];
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    const isValid = await bcrypt.compare(password, user.password_hash);
+    if (!isValid) return res.status(401).json({ error: 'Invalid password' });
+
+    const existing = await db.query('SELECT id FROM users WHERE email = $1 AND id != $2', [new_email, userId]);
+    if (existing.rows.length > 0) return res.status(409).json({ error: 'Email already in use' });
+
+    const { raw, hashed } = generateVerificationToken();
+    const expiresAt = new Date(Date.now() + TOKEN_TTL_MS);
+
+    await db.query(
+      `UPDATE users SET pending_email = $1, pending_email_token = $2, pending_email_token_expires_at = $3 WHERE id = $4`,
+      [new_email, hashed, expiresAt, userId]
+    );
+
+    await sendVerificationEmail(new_email, raw);
+    await sendEmailChangeRequestedNotice(user.email, new_email, req.ip, req.headers['user-agent']);
+
+    audit.log(userId, 'email_change_requested', req.ip, req.headers['user-agent'], { new_email });
+    res.json({ message: 'Verification email sent to new address. Check your inbox to confirm the change.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function verifyEmailChange(req, res, next) {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ error: 'Token is required' });
+
+    const hashed = crypto.createHash('sha256').update(token).digest('hex');
+    const result = await db.query(
+      `SELECT id, pending_email, pending_email_token_expires_at FROM users WHERE pending_email_token = $1`,
+      [hashed]
+    );
+
+    const user = result.rows[0];
+    if (!user) return res.status(400).json({ error: 'Invalid or expired token' });
+    if (new Date(user.pending_email_token_expires_at) < new Date()) {
+      return res.status(400).json({ error: 'Token has expired' });
+    }
+
+    await db.query(
+      `UPDATE users SET email = pending_email, pending_email = NULL, pending_email_token = NULL, pending_email_token_expires_at = NULL WHERE id = $1`,
+      [user.id]
+    );
+
+    audit.log(user.id, 'email_changed', req.ip, req.headers['user-agent'], { new_email: user.pending_email });
+    res.json({ message: 'Email address updated successfully.' });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function getActivity(req, res, next) {
   try {
     const result = await db.query(
@@ -861,6 +967,85 @@ async function getActivity(req, res, next) {
   }
 }
 
+async function changePassword(req, res, next) {
+  try {
+    const { current_password, new_password } = req.body;
+    const userId = req.user.userId;
+
+    const { rows } = await db.query('SELECT password_hash FROM users WHERE id = $1', [userId]);
+    if (!rows[0] || !(await bcrypt.compare(current_password, rows[0].password_hash))) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    const newHash = await bcrypt.hash(new_password, 12);
+    await db.query('UPDATE users SET password_hash = $1 WHERE id = $2', [newHash, userId]);
+
+    // Invalidate all other sessions
+    const currentHash = req.headers.authorization
+      ? require('crypto').createHash('sha256').update(req.headers.authorization.replace('Bearer ', '')).digest('hex')
+      : null;
+    if (currentHash) {
+      await invalidateOtherSessions(userId, currentHash).catch(() => {});
+    }
+
+    audit.log(userId, 'password_change', req.ip, req.headers['user-agent']);
+    res.json({ message: 'Password changed successfully' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// Magic-bytes signatures for allowed image types
+const IMAGE_MAGIC = [
+  { mime: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] },
+  { mime: 'image/png',  bytes: [0x89, 0x50, 0x4e, 0x47] },
+  { mime: 'image/webp', bytes: null, check: (b) => b[0]===0x52&&b[1]===0x49&&b[2]===0x46&&b[3]===0x46&&b[8]===0x57&&b[9]===0x45&&b[10]===0x42&&b[11]===0x50 },
+];
+
+function detectMime(buffer) {
+  for (const sig of IMAGE_MAGIC) {
+    if (sig.check) { if (buffer.length >= 12 && sig.check(buffer)) return sig.mime; }
+    else if (buffer.slice(0, sig.bytes.length).every((b, i) => b === sig.bytes[i])) return sig.mime;
+  }
+  return null;
+}
+
+async function uploadAvatar(req, res, next) {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const mime = detectMime(req.file.buffer);
+    if (!mime) {
+      return res.status(400).json({ error: 'Invalid file type. Only JPEG, PNG, and WebP are accepted.' });
+    }
+
+    const ext = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png';
+    const filename = `${req.user.userId}_${Date.now()}.${ext}`;
+
+    const path = require('path');
+    const fs = require('fs');
+    const dir = path.join(__dirname, '../../uploads/avatars');
+    fs.mkdirSync(dir, { recursive: true });
+
+    // Delete old avatar file if it exists
+    const old = await db.query('SELECT avatar_url FROM users WHERE id = $1', [req.user.userId]);
+    const oldUrl = old.rows[0]?.avatar_url;
+    if (oldUrl) {
+      const oldFile = path.join(dir, path.basename(oldUrl));
+      fs.unlink(oldFile, () => {});
+    }
+
+    fs.writeFileSync(path.join(dir, filename), req.file.buffer);
+
+    const avatarUrl = `/uploads/avatars/${filename}`;
+    await db.query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, req.user.userId]);
+
+    res.json({ avatar_url: avatarUrl });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   register,
   login,
@@ -870,7 +1055,10 @@ module.exports = {
   verifyPhone,
   getMe,
   updateProfile,
+  changeEmail,
+  verifyEmailChange,
   getActivity,
+  uploadAvatar,
   setPIN,
   verifyPIN,
   setup2FA,
@@ -878,4 +1066,8 @@ module.exports = {
   disable2FA,
   forgotPassword,
   resetPassword,
+  regenerateBackupCodes,
+  getBackupCodeCount,
+  changePassword,
+  validateResetToken,
 };

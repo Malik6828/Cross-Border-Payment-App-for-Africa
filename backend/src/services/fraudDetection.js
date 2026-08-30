@@ -1,188 +1,167 @@
-/**
- * Fraud detection service — single source of truth for all send-side checks.
- *
- * Velocity check  : blocks if a wallet sends >= FRAUD_MAX_TX_PER_WINDOW
- *                   transactions within DAILY_LIMIT_WINDOW_HOURS hours.
- *
- * Daily limit     : blocks if the rolling USD-equivalent total sent within
- *                   DAILY_LIMIT_WINDOW_HOURS hours would exceed
- *                   FRAUD_DAILY_LIMIT_USD.
- *
- * Both checks share the same configurable time window so enforcement is
- * consistent and documented in a single place (.env.example).
- */
+'use strict';
 
 const db = require('../db');
+const cache = require('../utils/cache');
+const logger = require('../utils/logger');
+
+const RULES_CACHE_KEY = 'fraud:rules';
+const RULES_CACHE_TTL = 300; // 5 minutes
 
 // ---------------------------------------------------------------------------
-// Config — all sourced from env with safe defaults
+// Rule loading
 // ---------------------------------------------------------------------------
 
-/** Rolling window in hours for both velocity and daily-limit checks (default 24 h) */
-const WINDOW_HOURS = parseFloat(process.env.DAILY_LIMIT_WINDOW_HOURS || '24');
+async function loadRules() {
+  const cached = await cache.get(RULES_CACHE_KEY);
+  if (cached) return cached;
 
-/** Max transactions allowed within the window before blocking (default 5) */
-const MAX_TX_PER_WINDOW = parseInt(process.env.FRAUD_MAX_TX_PER_WINDOW || '5', 10);
+  const { rows } = await db.query(
+    `SELECT id, name, rule_type, parameters FROM fraud_rules WHERE is_active = true`
+  );
+  await cache.set(RULES_CACHE_KEY, rows, RULES_CACHE_TTL);
+  return rows;
+}
 
-/** Max USD-equivalent total sent within the window (default 1000) */
-const DAILY_LIMIT_USD = parseFloat(process.env.FRAUD_DAILY_LIMIT_USD || '1000');
-
-/** Approximate XLM/USD rate — mirrors paymentController; replace with live feed in prod */
-const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || '0.11');
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function toUSD(amount, asset) {
-  const n = parseFloat(amount);
-  if (asset === 'USD' || asset === 'USDC') return n;
-  if (asset === 'XLM') return n * XLM_USD_RATE;
-  return 0; // unknown assets: don't block
+async function invalidateRulesCache() {
+  await cache.del(RULES_CACHE_KEY);
 }
 
 // ---------------------------------------------------------------------------
-// Exported checks
+// Rule evaluators
 // ---------------------------------------------------------------------------
 
-/**
- * Velocity check — returns true (suspicious) when the wallet has already
- * sent MAX_TX_PER_WINDOW or more transactions within the rolling window.
- *
- * @param {string} walletAddress
- * @returns {Promise<boolean>}
- */
-async function checkVelocity(walletAddress) {
+async function evaluateVelocity(rule, walletAddress) {
+  const { max_transactions, window_minutes } = rule.parameters;
   const { rows } = await db.query(
     `SELECT COUNT(*) FROM transactions
-     WHERE sender_wallet = $1
-       AND created_at > NOW() - ($2 || ' hours')::INTERVAL`,
-    [walletAddress, WINDOW_HOURS]
+     WHERE sender_wallet = $1 AND created_at > NOW() - ($2 * INTERVAL '1 minute')`,
+    [walletAddress, window_minutes]
   );
-  return parseInt(rows[0].count, 10) >= MAX_TX_PER_WINDOW;
-}
-
-/**
- * Daily limit check — returns true (exceeded) when the rolling USD total
- * already sent within the window plus the new amount would exceed
- * FRAUD_DAILY_LIMIT_USD.
- *
- * @param {string} walletAddress
- * @param {string|number} amount
- * @param {string} asset
- * @returns {Promise<boolean>}
- */
-async function checkDailyLimit(walletAddress, amount, asset) {
-  const { rows } = await db.query(
-    `SELECT COALESCE(SUM(amount), 0) AS total
-     FROM transactions
-     WHERE sender_wallet = $1
-       AND status = 'completed'
-       AND created_at > NOW() - ($2 || ' hours')::INTERVAL`,
-    [walletAddress, WINDOW_HOURS]
-  );
-
-  // Sum is in the transaction's native asset — convert to USD for comparison.
-  // We store the asset per-row but for simplicity we treat the running total
-  // as the same asset as the current payment (conservative approximation).
-  const alreadySentUSD = toUSD(rows[0].total, asset);
-  const newAmountUSD   = toUSD(amount, asset);
-
-  return (alreadySentUSD + newAmountUSD) > DAILY_LIMIT_USD;
-}
-
-module.exports = {
-  checkVelocity,
-  checkDailyLimit,
-  // Exported for tests
-  _config: { WINDOW_HOURS, MAX_TX_PER_WINDOW, DAILY_LIMIT_USD },
-const db = require('../db');
-
-const FRAUD_RULES = {
-  VELOCITY_TRANSACTIONS: {
-    limit: parseInt(process.env.FRAUD_VELOCITY_LIMIT || '5'),
-    window: parseInt(process.env.FRAUD_VELOCITY_WINDOW || '10') // minutes
-  },
-  LARGE_TRANSACTION: {
-    multiplier: parseFloat(process.env.FRAUD_LARGE_TX_MULTIPLIER || '3')
-  },
-  UNIQUE_RECIPIENTS: {
-    limit: parseInt(process.env.FRAUD_UNIQUE_RECIPIENTS || '5'),
-    window: parseInt(process.env.FRAUD_UNIQUE_RECIPIENTS_WINDOW || '60') // minutes
-  },
-  DAILY_LIMIT: {
-    amount: parseFloat(process.env.FRAUD_DAILY_LIMIT_USD || '10000')
+  const count = parseInt(rows[0].count, 10);
+  if (count >= max_transactions) {
+    return {
+      triggered: true,
+      message: `Exceeded ${max_transactions} transactions in ${window_minutes} minutes`,
+    };
   }
+  return { triggered: false };
+}
+
+async function evaluateAmount(rule, _walletAddress, amount, asset) {
+  const { max_usd } = rule.parameters;
+  const usdValue = toUsd(amount, asset);
+  if (usdValue > max_usd) {
+    return {
+      triggered: true,
+      message: `Transaction amount $${usdValue.toFixed(2)} exceeds single-transaction limit of $${max_usd}`,
+    };
+  }
+  return { triggered: false };
+}
+
+async function evaluateDailyLimit(rule, walletAddress, amount, asset) {
+  const { max_usd } = rule.parameters;
+  const { rows } = await db.query(
+    `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
+     WHERE sender_wallet = $1 AND created_at > NOW() - INTERVAL '24 hours' AND status != 'cancelled'`,
+    [walletAddress]
+  );
+  const sentUsd = toUsd(rows[0].total, asset);
+  const newUsd = toUsd(amount, asset);
+  if (sentUsd + newUsd > max_usd) {
+    return {
+      triggered: true,
+      message: `Daily limit of $${max_usd} would be exceeded ($${(sentUsd + newUsd).toFixed(2)} total)`,
+    };
+  }
+  return { triggered: false };
+}
+
+function toUsd(amount, asset) {
+  const n = parseFloat(amount) || 0;
+  if (asset === 'USDC') return n;
+  if (asset === 'XLM') return n * parseFloat(process.env.XLM_USD_RATE || '0.10');
+  return 0;
+}
+
+const EVALUATORS = {
+  velocity: evaluateVelocity,
+  amount: evaluateAmount,
+  daily_limit: evaluateDailyLimit,
 };
 
+// ---------------------------------------------------------------------------
+// Main check
+// ---------------------------------------------------------------------------
+
+/**
+ * Evaluate all active fraud rules against a payment.
+ * Returns { blocked, rule, message } where blocked=false if no rule triggers.
+ */
+async function checkFraud(walletAddress, amount, asset, paymentId = null) {
+  let rules;
+  try {
+    rules = await loadRules();
+  } catch (err) {
+    logger.warn('Failed to load fraud rules, falling back to pass-through', { error: err.message });
+    return { blocked: false };
+  }
+
+  for (const rule of rules) {
+    const evaluator = EVALUATORS[rule.rule_type];
+    if (!evaluator) continue;
+
+    let result;
+    try {
+      result = await evaluator(rule, walletAddress, amount, asset);
+    } catch (err) {
+      logger.warn('Fraud rule evaluation error', { rule: rule.name, error: err.message });
+      continue;
+    }
+
+    const outcome = result.triggered ? 'blocked' : 'passed';
+    // Log to audit table (fire-and-forget)
+    db.query(
+      `INSERT INTO fraud_checks (rule_name, rule_type, outcome, payment_id, wallet_address, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [rule.name, rule.rule_type, outcome, paymentId || null, walletAddress,
+       JSON.stringify({ amount, asset, ...result })]
+    ).catch(e => logger.warn('fraud_checks insert failed', { error: e.message }));
+
+    if (result.triggered) {
+      return { blocked: true, rule: rule.name, message: result.message };
+    }
+  }
+
+  return { blocked: false };
+}
+
+// ---------------------------------------------------------------------------
+// Legacy compatibility (checkVelocity / checkDailyLimit used by old tests)
+// ---------------------------------------------------------------------------
+
 async function checkVelocity(walletAddress) {
-  const result = await db.query(
+  const windowHours = parseInt(process.env.DAILY_LIMIT_WINDOW_HOURS || '24', 10);
+  const maxTx = parseInt(process.env.FRAUD_MAX_TX_PER_WINDOW || '5', 10);
+  const { rows } = await db.query(
     `SELECT COUNT(*) FROM transactions
-       WHERE sender_wallet = $1 AND created_at > NOW() - ($2 * INTERVAL '1 minute')`,
-    [walletAddress, FRAUD_RULES.VELOCITY_TRANSACTIONS.window]
+     WHERE sender_wallet = $1 AND created_at > NOW() - ($2 * INTERVAL '1 hour')`,
+    [walletAddress, windowHours]
   );
-  const count = parseInt(result.rows[0].count);
-  if (count >= FRAUD_RULES.VELOCITY_TRANSACTIONS.limit) {
-    return { blocked: true, reason: `Exceeded ${FRAUD_RULES.VELOCITY_TRANSACTIONS.limit} transactions in ${FRAUD_RULES.VELOCITY_TRANSACTIONS.window} minutes` };
-  }
-  return { blocked: false };
-}
-
-async function checkLargeTransaction(walletAddress, amount, asset) {
-  const result = await db.query(
-    `SELECT AVG(amount) as avg_amount FROM transactions
-     WHERE sender_wallet = $1 AND asset = $2 AND created_at > NOW() - INTERVAL '30 days'`,
-    [walletAddress, asset]
-  );
-
-  const avgAmount = parseFloat(result.rows[0]?.avg_amount || 0);
-  if (avgAmount > 0 && amount > avgAmount * FRAUD_RULES.LARGE_TRANSACTION.multiplier) {
-    return { blocked: true, reason: `Transaction exceeds ${FRAUD_RULES.LARGE_TRANSACTION.multiplier}x average (${avgAmount} ${asset})` };
-  }
-  return { blocked: false };
-}
-
-async function checkUniqueRecipients(walletAddress) {
-  const result = await db.query(
-    `SELECT COUNT(DISTINCT recipient_wallet) FROM transactions
-       WHERE sender_wallet = $1 AND created_at > NOW() - ($2 * INTERVAL '1 minute')`,
-    [walletAddress, FRAUD_RULES.UNIQUE_RECIPIENTS.window]
-  );
-  const count = parseInt(result.rows[0].count);
-  if (count >= FRAUD_RULES.UNIQUE_RECIPIENTS.limit) {
-    return { blocked: true, reason: `Sending to ${count} unique recipients in ${FRAUD_RULES.UNIQUE_RECIPIENTS.window} minutes` };
-  }
-  return { blocked: false };
+  return parseInt(rows[0].count, 10) >= maxTx;
 }
 
 async function checkDailyLimit(walletAddress, amount, asset) {
-  const XLM_USD_RATE = parseFloat(process.env.XLM_USD_RATE || '0.11');
-  const amountUSD = asset === 'USDC' ? parseFloat(amount) : parseFloat(amount) * XLM_USD_RATE;
-
-  const result = await db.query(
-    `SELECT SUM(CASE WHEN asset = 'USDC' THEN amount ELSE amount * $2 END) as total_usd
-     FROM transactions
-     WHERE sender_wallet = $1 AND created_at > NOW() - INTERVAL '24 hours'`,
-    [walletAddress, XLM_USD_RATE]
+  const limitUsd = parseFloat(process.env.FRAUD_DAILY_LIMIT_USD || '1000');
+  const windowHours = parseInt(process.env.DAILY_LIMIT_WINDOW_HOURS || '24', 10);
+  const { rows } = await db.query(
+    `SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
+     WHERE sender_wallet = $1 AND created_at > NOW() - ($2 * INTERVAL '1 hour')`,
+    [walletAddress, windowHours]
   );
-
-  const totalUSD = parseFloat(result.rows[0]?.total_usd || 0) + amountUSD;
-  if (totalUSD > FRAUD_RULES.DAILY_LIMIT.amount) {
-    return { blocked: true, reason: `Daily limit exceeded: $${totalUSD.toFixed(2)} > $${FRAUD_RULES.DAILY_LIMIT.amount}` };
-  }
-  return { blocked: false };
-}
-
-async function checkFraud(walletAddress, amount, asset) {
-  const checks = [
-    await checkVelocity(walletAddress),
-    await checkLargeTransaction(walletAddress, amount, asset),
-    await checkUniqueRecipients(walletAddress),
-    await checkDailyLimit(walletAddress, amount, asset)
-  ];
-
-  const blocked = checks.find(c => c.blocked);
-  return blocked || { blocked: false };
+  const sentUsd = toUsd(rows[0].total, asset);
+  const newUsd = toUsd(amount, asset);
+  return sentUsd + newUsd > limitUsd;
 }
 
 async function logFraudBlock(walletAddress, reason, amount, asset) {
@@ -195,6 +174,9 @@ async function logFraudBlock(walletAddress, reason, amount, asset) {
 
 module.exports = {
   checkFraud,
+  checkVelocity,
+  checkDailyLimit,
   logFraudBlock,
-  FRAUD_RULES
+  loadRules,
+  invalidateRulesCache,
 };

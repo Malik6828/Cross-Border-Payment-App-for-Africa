@@ -1,5 +1,5 @@
 const db = require('../db');
-const { issueAsset, getAssetInfo } = require('../services/stellar');
+const { issueAsset, getAssetInfo, getAssetMetadataByCodeAndIssuer } = require('../services/stellar');
 const logger = require('../utils/logger');
 
 // Issue AFRI tokens to a recipient (admin only)
@@ -44,4 +44,15 @@ async function getAssetMetadata(req, res, next) {
   }
 }
 
-module.exports = { issueTokens, getAssetMetadata };
+// GET /api/assets/:code/:issuer — return Stellar asset info for any asset
+async function getAssetByParams(req, res, next) {
+  try {
+    const { code, issuer } = req.params;
+    const info = await getAssetMetadataByCodeAndIssuer(code, issuer);
+    res.json(info);
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { issueTokens, getAssetMetadata, getAssetByParams };

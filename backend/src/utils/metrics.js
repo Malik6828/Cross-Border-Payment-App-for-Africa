@@ -40,6 +40,64 @@ const anchorPollDuration = new client.Histogram({
   help: 'Anchor transaction-status poll duration in seconds, per anchor',
   labelNames: ['anchor', 'success'],
   buckets: [0.05, 0.1, 0.3, 0.5, 1, 2, 5, 10],
+const paymentsTotal = new client.Counter({
+  name: 'afripay_payments_total',
+  help: 'Total payment state changes',
+  labelNames: ['status', 'asset'],
+  registers: [registry],
+});
+
+const paymentAmountUsdc = new client.Histogram({
+  name: 'afripay_payment_amount_usdc',
+  help: 'Distribution of payment amounts in USDC',
+  buckets: [1, 5, 10, 50, 100, 500, 1000, 5000, 10000],
+  registers: [registry],
+});
+
+const afripayHorizonDuration = new client.Histogram({
+  name: 'afripay_horizon_request_duration_ms',
+  help: 'Horizon API call latency in milliseconds',
+  labelNames: ['endpoint'],
+  buckets: [50, 100, 250, 500, 1000, 2500, 5000, 10000],
+  registers: [registry],
+});
+
+const activeUsers = new client.Gauge({
+  name: 'afripay_active_users',
+  help: 'Users with sessions active in last 5 minutes',
+  registers: [registry],
+});
+
+const emailQueueDepth = new client.Gauge({
+  name: 'afripay_email_queue_depth',
+  help: 'Email queue waiting job count',
+  registers: [registry],
+});
+
+const amlScreeningsTotal = new client.Counter({
+  name: 'afripay_aml_screenings_total',
+  help: 'Total AML screening decisions, labelled by outcome (clear, flagged, error, not_screened)',
+  labelNames: ['status'],
+  registers: [registry],
+});
+
+const amlScreeningCoverageGauge = new client.Gauge({
+  name: 'afripay_aml_screening_coverage_ratio',
+  help: 'Ratio of AML screening attempts performed by a real provider vs total attempts (provider screens + passthrough)',
+  registers: [registry],
+});
+
+const rateLimiterDegraded = new client.Gauge({
+  name: 'afripay_rate_limiter_degraded',
+  help: 'Whether a rate limiter has fallen back to per-process in-memory limiting (1) or is using shared Redis (0), labelled by limiter prefix',
+  labelNames: ['prefix'],
+  registers: [registry],
+});
+
+const rateLimiterRedisFailuresTotal = new client.Counter({
+  name: 'afripay_rate_limiter_redis_failures_total',
+  help: 'Total times the rate limiter Redis store was unavailable, labelled by prefix and reason',
+  labelNames: ['prefix', 'reason'],
   registers: [registry],
 });
 
@@ -50,4 +108,13 @@ module.exports = {
   dbQueryDuration,
   wsConnections,
   anchorPollDuration,
+  paymentsTotal,
+  paymentAmountUsdc,
+  afripayHorizonDuration,
+  activeUsers,
+  emailQueueDepth,
+  amlScreeningsTotal,
+  amlScreeningCoverageGauge,
+  rateLimiterDegraded,
+  rateLimiterRedisFailuresTotal,
 };

@@ -35,8 +35,9 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const login = async (email, password) => {
-    const res = await api.post('/auth/login', { email, password });
+  const login = async (email, password, options = {}, deviceToken = null) => {
+    const headers = deviceToken ? { 'x-device-token': deviceToken } : {};
+    const res = await api.post('/auth/login', { email, password, ...options }, { headers });
     tokenStore.set(res.data.token);
     setUser(res.data.user);
     Sentry.setUser({
@@ -59,12 +60,15 @@ export function AuthProvider({ children }) {
     }
     tokenStore.clear();
     localStorage.removeItem('afripay_slippage');
+    localStorage.removeItem('afripay_device_token');
     setUser(null);
     Sentry.setUser(null);
   };
 
+  const updateUser = (fields) => setUser((prev) => (prev ? { ...prev, ...fields } : fields));
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, updateUser }}>
       {children}
     </AuthContext.Provider>
   );

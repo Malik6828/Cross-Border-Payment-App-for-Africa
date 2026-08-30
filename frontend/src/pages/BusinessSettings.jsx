@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Plus, Trash2, ShieldCheck, Building2 } from 'lucide-react';
+import { ArrowLeft, Plus, Trash2, ShieldCheck, Building2, Webhook, RefreshCw, Eye, EyeOff, Copy, CheckCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import api from '../utils/api';
 import { truncateAddress } from '../utils/currency';
@@ -16,6 +16,12 @@ export default function BusinessSettings() {
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState(null);
   const [upgrading, setUpgrading] = useState(false);
+  const [webhooks, setWebhooks] = useState([]);
+  const [webhooksLoading, setWebhooksLoading] = useState(true);
+  const [rotating, setRotating] = useState(null);
+  const [rotateConfirm, setRotateConfirm] = useState(null);
+  const [revealedSecret, setRevealedSecret] = useState(null);
+  const [copiedSecret, setCopiedSecret] = useState(null);
 
   const isBusiness = user?.account_type === 'business';
 
@@ -25,6 +31,35 @@ export default function BusinessSettings() {
       .catch(() => toast.error('Failed to load signers'))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    api.get('/webhooks')
+      .then(r => setWebhooks(r.data.webhooks))
+      .catch(() => {})
+      .finally(() => setWebhooksLoading(false));
+  }, []);
+
+  const handleRotateSecret = async (webhookId) => {
+    setRotating(webhookId);
+    try {
+      const { data } = await api.post(`/webhooks/${webhookId}/rotate-secret`);
+      setWebhooks(prev => prev.map(w => w.id === webhookId ? { ...w, secret: data.secret } : w));
+      // Auto-reveal the new secret so the user can copy it before it's masked
+      setRevealedSecret(webhookId);
+      toast.success('Secret rotated successfully');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to rotate secret');
+    } finally {
+      setRotating(null);
+      setRotateConfirm(null);
+    }
+  };
+
+  const copyWebhookSecret = (id, secret) => {
+    navigator.clipboard.writeText(secret);
+    setCopiedSecret(id);
+    setTimeout(() => setCopiedSecret(null), 2000);
+  };
 
   const handleUpgrade = async () => {
     if (!window.confirm('Upgrade to a Business account? This enables multisig on your Stellar wallet.')) return;
@@ -42,10 +77,26 @@ export default function BusinessSettings() {
 
   const handleAddSigner = async (e) => {
     e.preventDefault();
+
+    // Validate Stellar public key format before submitting
+    const key = newKey.trim();
+    if (!key.startsWith('G')) {
+      toast.error('Invalid Stellar address — must start with "G"');
+      return;
+    }
+    if (key.length !== 56) {
+      toast.error(`Invalid Stellar address — must be 56 characters (got ${key.length})`);
+      return;
+    }
+    if (!/^[A-Z0-9]+$/.test(key)) {
+      toast.error('Invalid Stellar address — contains invalid characters');
+      return;
+    }
+
     setAdding(true);
     try {
-      const res = await api.post('/wallet/signers', { signer_public_key: newKey.trim(), label: newLabel.trim() || undefined });
-      setSigners(prev => [...prev, { signer_public_key: newKey.trim(), label: newLabel.trim() || null, added_at: new Date().toISOString() }]);
+      const res = await api.post('/wallet/signers', { signer_public_key: key, label: newLabel.trim() || undefined });
+      setSigners(prev => [...prev, { signer_public_key: key, label: newLabel.trim() || null, added_at: new Date().toISOString() }]);
       setNewKey('');
       setNewLabel('');
       toast.success('Signer added');
@@ -180,6 +231,103 @@ export default function BusinessSettings() {
           Removing all signers reverts the account to personal and resets thresholds to 1.
         </p>
       )}
+
+      {/* Webhook Configuration */}
+      <div className="bg-gray-900 rounded-2xl p-5 space-y-4">
+        <div className="flex items-center gap-2">
+          <Webhook size={18} className="text-primary-400" />
+          <h3 className="font-semibold text-white">Webhook Configurations</h3>
+        </div>
+
+        {webhooksLoading ? (
+          <p className="text-gray-500 text-sm text-center py-4">Loading...</p>
+        ) : webhooks.length === 0 ? (
+          <p className="text-gray-500 text-sm text-center py-4">
+            No webhooks configured. Create one from the Webhooks page.
+          </p>
+        ) : (
+          <div className="space-y-3">
+            {webhooks.map(wh => (
+              <div key={wh.id} className="bg-gray-800 rounded-xl p-3 space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-sm text-white font-mono break-all flex-1">{wh.url}</p>
+                  <span className={`shrink-0 text-xs px-2 py-0.5 rounded-full font-medium ${
+                    wh.active ? 'bg-green-500/20 text-green-400' : 'bg-gray-700 text-gray-400'
+                  }`}>
+                    {wh.active ? 'active' : 'inactive'}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap gap-1">
+                  {wh.events.map(ev => (
+                    <span key={ev} className="text-xs bg-gray-700 text-gray-300 font-mono px-2 py-0.5 rounded-lg">{ev}</span>
+                  ))}
+                </div>
+
+                {wh.secret && (
+                  <div className="bg-gray-700/50 rounded-lg px-3 py-2 flex items-center gap-2">
+                    <span className="text-xs text-gray-400 shrink-0">Secret:</span>
+                    <span className="text-xs font-mono text-yellow-400 flex-1 truncate">
+                      {revealedSecret === wh.id ? wh.secret : '••••••••••••••••'}
+                    </span>
+                    <button
+                      onClick={() => setRevealedSecret(revealedSecret === wh.id ? null : wh.id)}
+                      className="text-gray-500 hover:text-gray-300 shrink-0"
+                      aria-label={revealedSecret === wh.id ? 'Hide secret' : 'Reveal secret'}
+                    >
+                      {revealedSecret === wh.id ? <EyeOff size={14} /> : <Eye size={14} />}
+                    </button>
+                    <button
+                      onClick={() => copyWebhookSecret(wh.id, wh.secret)}
+                      className="text-gray-500 hover:text-gray-300 shrink-0"
+                      aria-label="Copy secret"
+                    >
+                      {copiedSecret === wh.id ? <CheckCheck size={14} className="text-green-400" /> : <Copy size={14} />}
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex gap-2">
+                  {rotateConfirm === wh.id ? (
+                    <>
+                      <button
+                        onClick={() => setRotateConfirm(null)}
+                        className="flex-1 py-2 rounded-lg bg-gray-700 text-gray-400 text-xs hover:text-white transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => handleRotateSecret(wh.id)}
+                        disabled={rotating === wh.id}
+                        className="flex-1 py-2 rounded-lg bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white text-xs font-semibold transition-colors"
+                      >
+                        {rotating === wh.id ? 'Rotating...' : 'Confirm Rotate'}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => setRotateConfirm(wh.id)}
+                      className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-orange-500/10 hover:bg-orange-500/20 border border-orange-500/30 text-orange-400 text-xs font-medium transition-colors"
+                    >
+                      <RefreshCw size={12} />
+                      Rotate Secret
+                    </button>
+                  )}
+                </div>
+
+                {rotateConfirm === wh.id && (
+                  <div className="bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+                    <p className="text-xs text-red-400">
+                      Warning: Rotating the secret will immediately invalidate the current HMAC signature.
+                      Update your server with the new secret before processing new webhook payloads.
+                    </p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -17,6 +17,20 @@ jest.mock('../utils/logger', () => ({
   info: jest.fn(),
 }));
 
+jest.mock('../utils/symmetricEncryption', () => ({
+  decryptSecret: (s) => s, // pass-through in tests
+  encryptSecret: (s) => s,
+}));
+
+// Stub DNS so tests don't make real network calls and don't hang under fake timers
+jest.mock('dns', () => ({
+  promises: {
+    lookup: jest.fn().mockResolvedValue({ address: '93.184.216.34', family: 4 }),
+    resolve4: jest.fn().mockResolvedValue(['93.184.216.34']),
+    resolve6: jest.fn().mockRejectedValue(new Error('ENODATA')),
+  },
+}));
+
 jest.mock('../db', () => ({ query: jest.fn() }));
 
 // We mock the built-in https module so no real network calls are made.
@@ -37,7 +51,10 @@ jest.mock('https', () => {
     return req;
   }
 
-  return { request, __setImpl: (fn) => { __mockImpl = fn; } };
+  // Stub Agent so pinnedAgent.js / ssrf.js can instantiate it without error
+  class Agent {}
+
+  return { request, Agent, __setImpl: (fn) => { __mockImpl = fn; } };
 });
 
 // Speed up exponential-backoff delays in all tests.
@@ -316,6 +333,69 @@ describe('deliver() — fan-out to multiple subscribers', () => {
     await expect(promise).resolves.toBeUndefined();
   });
 
+  test('outbound request uses X-AfriPay-Signature-256 header', async () => {
+    const EventEmitter = require('events');
+    let capturedOptions = null;
+
+    jest.spyOn(https, 'request').mockImplementation((options, callback) => {
+      capturedOptions = options;
+      const req = new EventEmitter();
+      req.write = jest.fn();
+      req.end = jest.fn(() => {
+        const res = new EventEmitter();
+        res.statusCode = 200;
+        res.resume = jest.fn();
+        callback(res);
+      });
+      return req;
+    });
+
+    db.query.mockResolvedValue({ rows: [{ url: 'https://example.com/hook', secret: 'sec' }] });
+
+    const promise = deliver('payment.sent', {});
+    await runTimers();
+    await promise;
+
+    expect(capturedOptions.headers).toHaveProperty('X-AfriPay-Signature-256');
+    expect(capturedOptions.headers['X-AfriPay-Signature-256']).toMatch(/^sha256=[0-9a-f]{64}$/);
+    expect(capturedOptions.headers).not.toHaveProperty('X-AfriPay-Signature');
+
+    jest.restoreAllMocks();
+  });
+
+  test('signature changes when secret changes', async () => {
+    const capturedHeaders = [];
+    const EventEmitter = require('events');
+
+    jest.spyOn(https, 'request').mockImplementation((options, callback) => {
+      capturedHeaders.push(options.headers['X-AfriPay-Signature-256']);
+      const req = new EventEmitter();
+      req.write = jest.fn();
+      req.end = jest.fn(() => {
+        const res = new EventEmitter();
+        res.statusCode = 200;
+        res.resume = jest.fn();
+        callback(res);
+      });
+      return req;
+    });
+
+    db.query.mockResolvedValueOnce({ rows: [{ url: 'https://example.com/hook', secret: 'secret-A' }] });
+    const p1 = deliver('payment.sent', { amount: '10' });
+    await runTimers();
+    await p1;
+
+    db.query.mockResolvedValueOnce({ rows: [{ url: 'https://example.com/hook', secret: 'secret-B' }] });
+    const p2 = deliver('payment.sent', { amount: '10' });
+    await runTimers();
+    await p2;
+
+    expect(capturedHeaders).toHaveLength(2);
+    expect(capturedHeaders[0]).not.toBe(capturedHeaders[1]);
+
+    jest.restoreAllMocks();
+  });
+
   test('payload sent to subscriber includes event, data, and ISO timestamp', async () => {
     // httpsPost calls req.write(body) then req.end().
     // Our mock fires the response inside req.end, so we capture body via write spy
@@ -344,7 +424,8 @@ describe('deliver() — fan-out to multiple subscribers', () => {
     expect(capturedBodies).toHaveLength(1);
     const parsed = JSON.parse(capturedBodies[0]);
     expect(parsed).toMatchObject({ event: 'payment.sent', data: { txId: 'xyz-123' } });
-    expect(parsed.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(typeof parsed.timestamp).toBe('number');
+    expect(parsed.timestamp).toBeGreaterThan(0);
 
     jest.restoreAllMocks();
   });

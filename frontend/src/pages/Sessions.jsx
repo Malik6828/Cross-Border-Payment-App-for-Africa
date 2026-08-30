@@ -1,14 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Monitor, Trash2, LogOut } from 'lucide-react';
+import { ArrowLeft, Monitor, Trash2, LogOut, ShieldCheck } from 'lucide-react';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
+import ConfirmModal from '../components/ConfirmModal';
 
 export default function Sessions() {
   const navigate = useNavigate();
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [revoking, setRevoking] = useState(null);
+  const [confirmAll, setConfirmAll] = useState(false);
+  const [confirmSingle, setConfirmSingle] = useState(null);
+  const [trustedDevice, setTrustedDevice] = useState(null); // { expiry: Date } | null
 
   const load = async () => {
     try {
@@ -21,7 +25,22 @@ export default function Sessions() {
     }
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    const raw = localStorage.getItem('afripay_device_token');
+    if (raw) {
+      try {
+        const payload = JSON.parse(atob(raw.split('.')[1]));
+        if (payload.exp * 1000 > Date.now()) {
+          setTrustedDevice({ expiry: new Date(payload.exp * 1000) });
+        } else {
+          localStorage.removeItem('afripay_device_token');
+        }
+      } catch {
+        localStorage.removeItem('afripay_device_token');
+      }
+    }
+  }, []);
 
   const revoke = async (id) => {
     setRevoking(id);
@@ -33,7 +52,14 @@ export default function Sessions() {
       toast.error('Failed to revoke session');
     } finally {
       setRevoking(null);
+      setConfirmSingle(null);
     }
+  };
+
+  const revokeTrustedDevice = () => {
+    localStorage.removeItem('afripay_device_token');
+    setTrustedDevice(null);
+    toast.success('Device trust removed');
   };
 
   const revokeAll = async () => {
@@ -46,6 +72,7 @@ export default function Sessions() {
       toast.error('Failed to revoke sessions');
     } finally {
       setRevoking(null);
+      setConfirmAll(false);
     }
   };
 
@@ -59,7 +86,7 @@ export default function Sessions() {
         <h2 className="text-2xl font-bold text-white">Active Sessions</h2>
         {sessions.length > 1 && (
           <button
-            onClick={revokeAll}
+            onClick={() => setConfirmAll(true)}
             disabled={revoking === 'all'}
             className="text-sm text-red-400 hover:text-red-300 flex items-center gap-1 disabled:opacity-50"
           >
@@ -108,7 +135,7 @@ export default function Sessions() {
 
               {!s.is_current && (
                 <button
-                  onClick={() => revoke(s.id)}
+                  onClick={() => setConfirmSingle(s)}
                   disabled={revoking === s.id}
                   className="text-red-400 hover:text-red-300 shrink-0 disabled:opacity-50"
                   aria-label="Revoke session"
@@ -124,6 +151,54 @@ export default function Sessions() {
           ))}
         </div>
       )}
+
+      {trustedDevice && (
+        <div className="mt-6">
+          <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Trusted Device</h3>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 bg-primary-500/20 rounded-lg flex items-center justify-center shrink-0">
+                <ShieldCheck size={16} className="text-primary-400" />
+              </div>
+              <div>
+                <p className="text-sm text-white font-medium">This device</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Trusted until {trustedDevice.expiry.toLocaleDateString()}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={revokeTrustedDevice}
+              className="text-red-400 hover:text-red-300 shrink-0"
+              aria-label="Remove device trust"
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      <ConfirmModal
+        isOpen={confirmAll}
+        onClose={() => setConfirmAll(false)}
+        onConfirm={revokeAll}
+        title="Logout from all other sessions?"
+        message="This will immediately invalidate all other active sessions. You will remain logged in on this device. Any ongoing operations on those sessions will be interrupted."
+        confirmLabel="Logout Everywhere"
+        confirmVariant="danger"
+        loading={revoking === 'all'}
+      />
+
+      <ConfirmModal
+        isOpen={!!confirmSingle}
+        onClose={() => setConfirmSingle(null)}
+        onConfirm={() => revoke(confirmSingle.id)}
+        title="Revoke session?"
+        message={`This will immediately invalidate the session${confirmSingle ? ` on "${confirmSingle.device_info || 'Unknown device'}"` : ''}. The user will be signed out and any ongoing operations on that session will be interrupted.`}
+        confirmLabel="Revoke Session"
+        confirmVariant="danger"
+        loading={revoking === confirmSingle?.id}
+      />
     </div>
   );
 }

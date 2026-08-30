@@ -12,10 +12,8 @@
  */
 
 const StellarSdk = require("@stellar/stellar-sdk");
-const crypto = require("crypto");
 
-const ALGORITHM = "aes-256-cbc";
-const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
+const { decryptAesCbc } = require("../utils/symmetricEncryption");
 
 const isTestnet = process.env.STELLAR_NETWORK !== "mainnet";
 const networkPassphrase = isTestnet
@@ -35,14 +33,7 @@ function getRpc() {
 }
 
 function decryptSecret(encryptedKey) {
-  const [ivHex, encrypted] = encryptedKey.split(":");
-  const iv = Buffer.from(ivHex, "hex");
-  const decipher = crypto.createDecipheriv(
-    ALGORITHM,
-    Buffer.from(ENCRYPTION_KEY),
-    iv
-  );
-  return decipher.update(encrypted, "hex", "utf8") + decipher.final("utf8");
+  return decryptAesCbc(encryptedKey);
 }
 
 function requireContractId() {
@@ -150,7 +141,8 @@ async function redeemPoints({ encryptedSecretKey, walletAddress }) {
  * Returns the point balance as a number.
  */
 async function getBalance({ walletAddress }) {
-  requireContractId();
+  // Return 0 if loyalty contract is not configured (non-fatal)
+  if (!CONTRACT_ID) return 0;
 
   const rpc = getRpc();
   const contract = new StellarSdk.Contract(CONTRACT_ID);
