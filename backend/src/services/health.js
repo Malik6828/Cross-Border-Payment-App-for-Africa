@@ -135,11 +135,18 @@ async function runDeepHealthChecks() {
   const ledger_listener = checkLedgerListener();
   const rate_limiter = checkRateLimiter();
 
+  // BE-036: surface which Horizon endpoint (primary/fallback) is currently
+  // active and how long the current fallback activation has lasted, so
+  // operators can see it directly in the deep health check output.
+  const horizonEndpoint = stellar.getHorizonEndpointStatus();
+  horizon.endpoint = horizonEndpoint;
+
   const criticalFailed = database.status === 'unhealthy' || redis.status === 'unhealthy';
   const nonCriticalFailed =
     horizon.status === 'unhealthy' ||
     ledger_listener.status === 'degraded' ||
-    rate_limiter.status === 'degraded';
+    rate_limiter.status === 'degraded' ||
+    horizonEndpoint.alertExceeded;
 
   let status;
   if (criticalFailed) status = 'unhealthy';

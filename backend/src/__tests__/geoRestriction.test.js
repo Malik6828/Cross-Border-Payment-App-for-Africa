@@ -25,8 +25,13 @@ jest.mock('../utils/logger', () => ({
   debug: jest.fn(),
 }));
 
+jest.mock('../services/audit', () => ({
+  auditLog: jest.fn().mockResolvedValue(undefined),
+}));
+
 const geoip = require('geoip-lite');
 const logger = require('../utils/logger');
+const { auditLog } = require('../services/audit');
 
 // Now require the middleware — it will read the env var we set above.
 let geoRestriction;
@@ -283,5 +288,63 @@ describe('geoRestriction middleware', () => {
 
     expect(next).toHaveBeenCalled();
     expect(res.statusCode).toBe(200);
+  });
+});
+
+// BE-037: denial audit logging and central configurability
+describe('geoRestriction compliance audit logging (BE-037)', () => {
+  beforeEach(() => {
+    auditLog.mockClear();
+  });
+
+  test('writes an audit log entry with country and route when a request is denied', () => {
+    geoip.lookup.mockReturnValue({ country: 'IR' });
+
+    const req = makeReq({ baseUrl: '/api/payments', originalUrl: '/api/payments/send' });
+    const res = makeRes();
+    const next = jest.fn();
+
+    geoRestriction(req, res, next);
+
+    expect(auditLog).toHaveBeenCalledWith(
+      req,
+      'geo_restriction_denied',
+      expect.objectContaining({
+        newValue: expect.objectContaining({ country: 'IR', route: '/api/payments' }),
+      })
+    );
+  });
+
+  test('does not write an audit entry when the request is allowed', () => {
+    geoip.lookup.mockReturnValue({ country: 'NG' });
+
+    const req = makeReq();
+    const res = makeRes();
+    const next = jest.fn();
+
+    geoRestriction(req, res, next);
+
+    expect(auditLog).not.toHaveBeenCalled();
+  });
+
+  test('the blocked-country set is sourced from BLOCKED_COUNTRIES config, not a hardcoded list', () => {
+    // reloadBlockedCountries lets ops/tests force a re-read of the env var
+    // without restarting the process, proving the list is config-driven.
+    expect(typeof geoRestriction.reloadBlockedCountries).toBe('function');
+
+    const previous = process.env.BLOCKED_COUNTRIES;
+    process.env.BLOCKED_COUNTRIES = 'NG';
+    geoRestriction.reloadBlockedCountries();
+
+    geoip.lookup.mockReturnValue({ country: 'NG' });
+    const req = makeReq();
+    const res = makeRes();
+    const next = jest.fn();
+    geoRestriction(req, res, next);
+    expect(res.statusCode).toBe(451);
+
+    // restore
+    process.env.BLOCKED_COUNTRIES = previous;
+    geoRestriction.reloadBlockedCountries();
   });
 });

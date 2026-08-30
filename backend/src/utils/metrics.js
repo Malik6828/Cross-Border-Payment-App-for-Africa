@@ -101,6 +101,45 @@ const rateLimiterRedisFailuresTotal = new client.Counter({
   registers: [registry],
 });
 
+// BE-034: distributed lock heartbeat/renewal metrics
+const distributedLockRenewalFailuresTotal = new client.Counter({
+  name: 'afripay_distributed_lock_renewal_failures_total',
+  help: 'Total times a distributed lock heartbeat renewal failed or lost ownership, labelled by lock key',
+  labelNames: ['lock_key'],
+  registers: [registry],
+});
+
+const distributedLockLostTotal = new client.Counter({
+  name: 'afripay_distributed_lock_lost_total',
+  help: 'Total times a long-running job detected it lost its distributed lock mid-run, labelled by lock key',
+  labelNames: ['lock_key'],
+  registers: [registry],
+});
+
+// BE-036: Horizon fallback duration metrics
+const horizonFallbackActive = new client.Gauge({
+  name: 'afripay_horizon_fallback_active',
+  help: 'Whether the backend is currently serving Horizon requests from the fallback node (1) or primary (0)',
+  registers: [registry],
+});
+
+const horizonFallbackDurationSeconds = new client.Gauge({
+  name: 'afripay_horizon_fallback_duration_seconds',
+  help: 'How long (seconds) the current fallback activation has been continuously active; 0 when on primary',
+  registers: [registry],
+});
+
+const horizonFallbackAlertsTotal = new client.Counter({
+  name: 'afripay_horizon_fallback_alerts_total',
+  help: 'Total times an alert was raised for Horizon fallback exceeding the configured duration threshold',
+  registers: [registry],
+});
+
+// BE-037: geo-restriction denial metrics
+const geoDenialsTotal = new client.Counter({
+  name: 'afripay_geo_denials_total',
+  help: 'Total requests denied by geo-restriction, labelled by country and route',
+  labelNames: ['country', 'route'],
 const txQueueDepth = new client.Gauge({
   name: 'afripay_tx_queue_depth',
   help: 'Number of per-wallet transaction submission queues currently holding a pending/in-flight task (txQueue.js)',
@@ -139,6 +178,12 @@ module.exports = {
   amlScreeningCoverageGauge,
   rateLimiterDegraded,
   rateLimiterRedisFailuresTotal,
+  distributedLockRenewalFailuresTotal,
+  distributedLockLostTotal,
+  horizonFallbackActive,
+  horizonFallbackDurationSeconds,
+  horizonFallbackAlertsTotal,
+  geoDenialsTotal,
   txQueueDepth,
   txQueueBackpressure,
   txQueuePendingTasksTotal,

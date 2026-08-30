@@ -1076,6 +1076,25 @@ async function bulkKycUpdate(req, res, next) {
 }
 
 /**
+ * GET /api/admin/compliance/geo-denials
+ * BE-037: Compliance report summarizing geo-restriction denials over a date
+ * range - "how many attempts did we see from jurisdiction X in period Y",
+ * grouped by country/route/day, backed by the audit_logs entries the
+ * geoRestriction middleware writes for every denied request.
+ *
+ * Query params: from, to (ISO date strings; default last 30 days).
+ */
+async function getGeoDenialsReport(req, res, next) {
+  try {
+    const { from, to } = req.query;
+    const report = await audit.getGeoDenialReport({ from, to });
+    res.json(report);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
  * GET /api/admin/audit-logs
  * Cursor-based paginated audit log viewer.
  * Supports filtering by actor, action, resource_type, and date range.
@@ -1250,6 +1269,7 @@ module.exports = {
   bulkKycUpdate,
   // #698
   getAuditLogs,
+  getGeoDenialsReport,
   // #979 (BE-032)
   overrideAmlFlag,
   getAmlOverrides,

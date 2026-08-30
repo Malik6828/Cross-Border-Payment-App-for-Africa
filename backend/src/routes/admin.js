@@ -31,6 +31,7 @@ const {
   getJobStatus,
   bulkKycUpdate,
   getAuditLogs,
+  getGeoDenialsReport,
   overrideAmlFlag,
   getAmlOverrides,
 } = require('../controllers/adminController');
@@ -268,6 +269,7 @@ router.get('/notifications/dead-letter', getDeadLetterNotifications);
 // Immutable Audit Log (#698)
 // ---------------------------------------------------------------------------
 router.get('/audit-logs', getAuditLogs);
+router.get('/compliance/geo-denials', getGeoDenialsReport);
 
 /**
  * @openapi
