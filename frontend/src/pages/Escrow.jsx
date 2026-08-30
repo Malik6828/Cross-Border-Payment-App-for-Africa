@@ -187,9 +187,13 @@ export default function Escrow() {
         <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-6">Agent Escrow</h1>
 
         {/* Tabs */}
-        <div className="flex gap-4 mb-6 border-b border-gray-200 dark:border-gray-800">
+        <div className="flex gap-4 mb-6 border-b border-gray-200 dark:border-gray-800" role="tablist" aria-label="Escrow views">
           <button
             onClick={() => setActiveTab('create')}
+            role="tab"
+            aria-selected={activeTab === 'create'}
+            id="escrow-tab-create"
+            aria-controls="escrow-panel-create"
             className={`px-4 py-2 font-medium transition-colors ${
               activeTab === 'create'
                 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
@@ -200,6 +204,10 @@ export default function Escrow() {
           </button>
           <button
             onClick={() => setActiveTab('list')}
+            role="tab"
+            aria-selected={activeTab === 'list'}
+            id="escrow-tab-list"
+            aria-controls="escrow-panel-list"
             className={`px-4 py-2 font-medium transition-colors ${
               activeTab === 'list'
                 ? 'text-blue-600 dark:text-blue-400 border-b-2 border-blue-600 dark:border-blue-400'
@@ -212,54 +220,66 @@ export default function Escrow() {
 
         {/* Create Escrow Tab */}
         {activeTab === 'create' && (
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow p-6">
-            <form onSubmit={handleCreateEscrow} className="space-y-4">
+          <div
+            className="bg-white dark:bg-gray-900 rounded-lg shadow p-6"
+            role="tabpanel"
+            id="escrow-panel-create"
+            aria-labelledby="escrow-tab-create"
+          >
+            <form onSubmit={handleCreateEscrow} className="space-y-4" aria-busy={loading}>
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                <label htmlFor="escrow-agent-wallet" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Agent Wallet Address
                 </label>
                 <input
+                  id="escrow-agent-wallet"
                   type="text"
                   value={createForm.agent_wallet}
                   onChange={(e) => setCreateForm({ ...createForm, agent_wallet: e.target.value })}
                   placeholder="G..."
+                  aria-required="true"
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                <label htmlFor="escrow-recipient-wallet" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Recipient Wallet Address
                 </label>
                 <input
+                  id="escrow-recipient-wallet"
                   type="text"
                   value={createForm.recipient_wallet}
                   onChange={(e) => setCreateForm({ ...createForm, recipient_wallet: e.target.value })}
                   placeholder="G..."
+                  aria-required="true"
                   className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
                 />
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  <label htmlFor="escrow-amount" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Amount
                   </label>
                   <input
+                    id="escrow-amount"
                     type="number"
                     step="0.01"
                     value={createForm.amount}
                     onChange={(e) => setCreateForm({ ...createForm, amount: e.target.value })}
                     placeholder="0.00"
+                    aria-required="true"
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  <label htmlFor="escrow-asset" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Asset
                   </label>
                   <select
+                    id="escrow-asset"
                     value={createForm.asset}
                     onChange={(e) => setCreateForm({ ...createForm, asset: e.target.value })}
                     className="w-full px-3 py-2 border border-gray-300 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none"
@@ -272,6 +292,7 @@ export default function Escrow() {
               <button
                 type="submit"
                 disabled={loading}
+                aria-busy={loading}
                 className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
               >
                 {loading ? 'Creating...' : 'Create Escrow'}
@@ -282,7 +303,14 @@ export default function Escrow() {
 
         {/* List Escrows Tab */}
         {activeTab === 'list' && (
-          <div className="space-y-4">
+          <div
+            className="space-y-4"
+            role="tabpanel"
+            id="escrow-panel-list"
+            aria-labelledby="escrow-tab-list"
+            aria-live="polite"
+            aria-busy={loading}
+          >
             {loading && !escrows.length ? (
               <div className="text-center py-8 text-gray-500 dark:text-gray-400">Loading...</div>
             ) : escrows.length === 0 ? (
@@ -293,6 +321,16 @@ export default function Escrow() {
                   key={escrow.id}
                   className="bg-white dark:bg-gray-900 rounded-lg shadow p-4 cursor-pointer hover:shadow-lg transition-shadow"
                   onClick={() => setSelectedEscrow(selectedEscrow?.id === escrow.id ? null : escrow)}
+                  role="button"
+                  tabIndex={0}
+                  aria-expanded={selectedEscrow?.id === escrow.id}
+                  aria-label={`Escrow of ${escrow.amount} ${escrow.asset}, status ${escrow.status}`}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setSelectedEscrow(selectedEscrow?.id === escrow.id ? null : escrow);
+                    }
+                  }}
                 >
                   <div className="flex justify-between items-start mb-2">
                     <div>
@@ -339,6 +377,8 @@ export default function Escrow() {
                               handleConfirmEscrow(escrow.id, escrow);
                             }}
                             disabled={loading}
+                            aria-busy={loading}
+                            aria-label={`Fully release escrow of ${escrow.amount} ${escrow.asset}`}
                             className="flex-1 min-w-[120px] bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
                           >
                             Full Release
@@ -349,6 +389,8 @@ export default function Escrow() {
                               openPartialRelease(escrow);
                             }}
                             disabled={loading}
+                            aria-label={`Partially release escrow of ${escrow.amount} ${escrow.asset}`}
+                            aria-haspopup="dialog"
                             className="flex-1 min-w-[120px] bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
                           >
                             Partial Release
@@ -359,6 +401,8 @@ export default function Escrow() {
                               handleCancelEscrow(escrow.id);
                             }}
                             disabled={loading}
+                            aria-busy={loading}
+                            aria-label={`Cancel escrow of ${escrow.amount} ${escrow.asset}`}
                             className="flex-1 min-w-[120px] bg-red-600 hover:bg-red-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
                           >
                             Cancel
@@ -376,19 +420,25 @@ export default function Escrow() {
 
       {/* Partial Release Modal (issue #657) */}
       {partialEscrow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="partial-release-title"
+        >
           <div className="bg-white dark:bg-gray-900 rounded-2xl p-6 w-full max-w-sm">
-            <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-1">Partial Release</h3>
+            <h3 id="partial-release-title" className="text-lg font-bold text-gray-900 dark:text-white mb-1">Partial Release</h3>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
               Escrowed balance: {remainingBalance(partialEscrow)} {partialEscrow.asset}
             </p>
 
-            <form onSubmit={handlePartialRelease} className="space-y-4">
+            <form onSubmit={handlePartialRelease} className="space-y-4" aria-busy={partialLoading}>
               <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                <label htmlFor="partial-release-amount" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Amount to release
                 </label>
                 <input
+                  id="partial-release-amount"
                   type="number"
                   step="0.0000001"
                   min="0"
@@ -396,15 +446,21 @@ export default function Escrow() {
                   value={partialAmount}
                   onChange={(e) => setPartialAmount(e.target.value)}
                   autoFocus
+                  aria-invalid={!!partialError}
+                  aria-describedby={partialError ? 'partial-release-error' : undefined}
                   className={`w-full px-3 py-2 border rounded-lg bg-white dark:bg-gray-800 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 outline-none ${
                     partialError ? 'border-red-500' : 'border-gray-300 dark:border-gray-700'
                   }`}
                 />
-                {partialError && <p className="text-xs text-red-500 mt-1">{partialError}</p>}
+                {partialError && (
+                  <p id="partial-release-error" role="alert" aria-live="assertive" className="text-xs text-red-500 mt-1">
+                    {partialError}
+                  </p>
+                )}
               </div>
 
               {/* Preview */}
-              <div className="rounded-lg bg-gray-50 dark:bg-gray-800 p-3 space-y-1 text-sm">
+              <div className="rounded-lg bg-gray-50 dark:bg-gray-800 p-3 space-y-1 text-sm" aria-live="polite">
                 <div className="flex justify-between text-gray-600 dark:text-gray-400">
                   <span>Amount to release</span>
                   <span className="text-gray-900 dark:text-white">{previewAmount.toFixed(7)} {partialEscrow.asset}</span>
@@ -430,6 +486,7 @@ export default function Escrow() {
                 <button
                   type="submit"
                   disabled={partialLoading || !!partialError || previewAmount <= 0}
+                  aria-busy={partialLoading}
                   className="flex-1 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-2 rounded-lg transition-colors"
                 >
                   {partialLoading ? 'Releasing…' : 'Confirm Release'}

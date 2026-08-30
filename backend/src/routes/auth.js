@@ -28,6 +28,11 @@ const {
   getBackupCodeCount,
   changePassword,
   validateResetToken,
+  revokeDeviceTrust,
+  webauthnRegisterOptions,
+  webauthnRegister,
+  webauthnLoginOptions,
+  webauthnVerify,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
 const geoRestriction = require('../middleware/geoRestriction');
@@ -222,9 +227,23 @@ router.post(
   uploadAvatar
 );
 
+// WebAuthn / biometric credentials
+router.post('/webauthn/register/options', authMiddleware, webauthnRegisterOptions);
+router.post('/webauthn/register', authMiddleware, webauthnRegister);
+router.post(
+  '/webauthn/verify/options',
+  [body('email').isEmail().normalizeEmail()],
+  validate,
+  webauthnLoginOptions
+);
+router.post('/webauthn/verify', webauthnVerify);
+
 // Session management
 router.get('/sessions', authMiddleware, listSessions);
 router.delete('/sessions', authMiddleware, revokeAllSessions);
 router.delete('/sessions/:id', authMiddleware, revokeSession);
+
+// Device trust (issue #995) — clears the httpOnly device-trust cookie.
+router.delete('/device-trust', authMiddleware, revokeDeviceTrust);
 
 module.exports = router;

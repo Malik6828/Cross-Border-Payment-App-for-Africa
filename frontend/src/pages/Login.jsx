@@ -64,16 +64,13 @@ export default function Login() {
     e.preventDefault();
     setLoading(true);
     try {
-      const existingDeviceToken = localStorage.getItem('afripay_device_token');
-      const result = await login(
+      // Device-trust is now carried by an httpOnly cookie the backend sets on login
+      // (issue #995) — the browser attaches it automatically, no localStorage needed.
+      await login(
         form.email,
         form.password,
-        rememberDevice ? { rememberDevice: true } : {},
-        existingDeviceToken
+        rememberDevice ? { rememberDevice: true } : {}
       );
-      if (result?.device_token) {
-        localStorage.setItem('afripay_device_token', result.device_token);
-      }
       const redirectParam = searchParams.get('redirect');
       const redirect = redirectParam || sessionStorage.getItem('afripay_redirect');
       sessionStorage.removeItem('afripay_redirect');
@@ -104,15 +101,11 @@ export default function Login() {
     if (digits.length === 6) {
       setLoading(true);
       try {
-        const deviceToken = localStorage.getItem('afripay_device_token');
+        // Device-trust cookie (httpOnly) is attached automatically by the browser.
         const res = await api.post(
           '/auth/login',
-          { email: form.email, password: form.password, totp_code: digits, ...(rememberDevice && { rememberDevice: true }) },
-          deviceToken ? { headers: { 'x-device-token': deviceToken } } : {}
+          { email: form.email, password: form.password, totp_code: digits, ...(rememberDevice && { rememberDevice: true }) }
         );
-        if (res.data.device_token) {
-          localStorage.setItem('afripay_device_token', res.data.device_token);
-        }
         // Manually set token + user via the same path login() uses
         const { tokenStore } = await import('../context/AuthContext');
         tokenStore.set(res.data.token);
