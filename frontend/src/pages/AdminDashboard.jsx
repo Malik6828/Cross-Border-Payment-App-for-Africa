@@ -61,8 +61,9 @@ export default function AdminDashboard() {
   }, []);
 
   if (loading) return (
-    <div className="flex items-center justify-center h-64">
-      <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+    <div className="flex items-center justify-center h-64" role="status" aria-live="polite" aria-label="Loading admin dashboard">
+      <div className="w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" aria-hidden="true" />
+      <span className="sr-only">Loading admin dashboard…</span>
     </div>
   );
 
@@ -74,72 +75,79 @@ export default function AdminDashboard() {
   }));
 
   return (
-    <div className="px-4 py-6 max-w-6xl mx-auto space-y-6">
+    <div className="px-4 py-6 max-w-6xl mx-auto space-y-6" role="main" aria-label="Admin dashboard">
       <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Admin Dashboard</h2>
 
       {/* Platform Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div
+        className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"
+        role="group"
+        aria-label="Platform statistics"
+        aria-live="polite"
+      >
         <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
+            <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500" aria-hidden="true">
               <Users size={20} />
             </div>
             <div>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Total Users</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-white">{stats?.total_users || 0}</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-total-users-label">Total Users</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-white" aria-labelledby="stat-total-users-label">{stats?.total_users || 0}</p>
             </div>
           </div>
         </div>
 
         <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
+            <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500" aria-hidden="true">
               <Activity size={20} />
             </div>
             <div>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Transactions</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-white">{stats?.total_transactions || 0}</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-transactions-label">Transactions</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-white" aria-labelledby="stat-transactions-label">{stats?.total_transactions || 0}</p>
             </div>
           </div>
         </div>
 
         <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
+            <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500" aria-hidden="true">
               <DollarSign size={20} />
             </div>
             <div>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Total Volume</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-white">{parseFloat(stats?.total_volume || 0).toFixed(2)}</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-volume-label">Total Volume</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-white" aria-labelledby="stat-volume-label">{parseFloat(stats?.total_volume || 0).toFixed(2)}</p>
             </div>
           </div>
         </div>
 
         <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500">
+            <div className="w-10 h-10 bg-primary-500/10 rounded-lg flex items-center justify-center text-primary-500" aria-hidden="true">
               <TrendingUp size={20} />
             </div>
             <div>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Total Fees</p>
-              <p className="text-2xl font-bold text-gray-900 dark:text-white">{parseFloat(stats?.total_fees || 0).toFixed(2)}</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400" id="stat-fees-label">Total Fees</p>
+              <p className="text-2xl font-bold text-gray-900 dark:text-white" aria-labelledby="stat-fees-label">{parseFloat(stats?.total_fees || 0).toFixed(2)}</p>
             </div>
           </div>
         </div>
       </div>
 
       {/* Daily Analytics Chart */}
-      <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm">
+      <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm" role="region" aria-labelledby="daily-analytics-heading">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
-            <BarChart3 size={20} className="text-primary-500" />
-            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Daily Analytics (Last 30 Days)</h3>
+            <BarChart3 size={20} className="text-primary-500" aria-hidden="true" />
+            <h3 id="daily-analytics-heading" className="text-lg font-semibold text-gray-900 dark:text-white">Daily Analytics (Last 30 Days)</h3>
           </div>
-          <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1">
+          <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 rounded-lg p-1" role="group" aria-label="Chart metric selector">
             {['volume', 'transactions', 'fees'].map((mode) => (
               <button
                 key={mode}
                 onClick={() => setChartMode(mode)}
+                aria-pressed={chartMode === mode}
+                aria-label={`Show ${mode} chart`}
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                   chartMode === mode
                     ? 'bg-primary-500 text-white'
@@ -152,7 +160,7 @@ export default function AdminDashboard() {
           </div>
         </div>
 
-        <div className="h-72">
+        <div className="h-72" role="img" aria-label={`Bar chart of daily ${chartMode} for the last 30 days`}>
           {chartData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData}>
@@ -182,12 +190,12 @@ export default function AdminDashboard() {
       </div>
 
       {/* Daily Transaction Volume Trend */}
-      <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm">
+      <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm" role="region" aria-labelledby="volume-trend-heading">
         <div className="flex items-center gap-2 mb-4">
-          <TrendingUp size={20} className="text-primary-500" />
-          <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Volume Trend</h3>
+          <TrendingUp size={20} className="text-primary-500" aria-hidden="true" />
+          <h3 id="volume-trend-heading" className="text-lg font-semibold text-gray-900 dark:text-white">Volume Trend</h3>
         </div>
-        <div className="h-72">
+        <div className="h-72" role="img" aria-label="Line chart of daily volume trend for the last 30 days">
           {chartData.length > 0 ? (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={chartData}>
@@ -212,44 +220,44 @@ export default function AdminDashboard() {
       </div>
 
       {/* Stellar Network Stats */}
-      <div className="bg-gradient-to-br from-primary-600 to-primary-700 rounded-2xl p-6 shadow-lg">
+      <div className="bg-gradient-to-br from-primary-600 to-primary-700 rounded-2xl p-6 shadow-lg" role="region" aria-labelledby="stellar-stats-heading">
         <div className="flex items-center gap-3 mb-4">
-          <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center text-white">
+          <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center text-white" aria-hidden="true">
             <Server size={20} />
           </div>
-          <h3 className="text-xl font-bold text-white">Stellar Network Statistics</h3>
+          <h3 id="stellar-stats-heading" className="text-xl font-bold text-white">Stellar Network Statistics</h3>
         </div>
 
         {stellarStats ? (
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4" aria-live="polite">
             <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1">Latest Ledger</p>
-              <p className="text-2xl font-bold text-white">{stellarStats.latestLedger?.toLocaleString()}</p>
+              <p className="text-primary-100 text-sm mb-1" id="stat-latest-ledger-label">Latest Ledger</p>
+              <p className="text-2xl font-bold text-white" aria-labelledby="stat-latest-ledger-label">{stellarStats.latestLedger?.toLocaleString()}</p>
             </div>
 
             <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1">Base Fee (stroops)</p>
-              <p className="text-2xl font-bold text-white">{stellarStats.baseFee}</p>
+              <p className="text-primary-100 text-sm mb-1" id="stat-base-fee-label">Base Fee (stroops)</p>
+              <p className="text-2xl font-bold text-white" aria-labelledby="stat-base-fee-label">{stellarStats.baseFee}</p>
             </div>
 
             <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1">Max Tx Set Size</p>
-              <p className="text-2xl font-bold text-white">{stellarStats.maxFee}</p>
+              <p className="text-primary-100 text-sm mb-1" id="stat-max-tx-label">Max Tx Set Size</p>
+              <p className="text-2xl font-bold text-white" aria-labelledby="stat-max-tx-label">{stellarStats.maxFee}</p>
             </div>
 
             <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1">Transactions</p>
-              <p className="text-2xl font-bold text-white">{stellarStats.transactionCount}</p>
+              <p className="text-primary-100 text-sm mb-1" id="stat-tx-count-label">Transactions</p>
+              <p className="text-2xl font-bold text-white" aria-labelledby="stat-tx-count-label">{stellarStats.transactionCount}</p>
             </div>
 
             <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1">Operations</p>
-              <p className="text-2xl font-bold text-white">{stellarStats.operationCount}</p>
+              <p className="text-primary-100 text-sm mb-1" id="stat-op-count-label">Operations</p>
+              <p className="text-2xl font-bold text-white" aria-labelledby="stat-op-count-label">{stellarStats.operationCount}</p>
             </div>
 
             <div className="bg-white/10 rounded-lg p-4">
-              <p className="text-primary-100 text-sm mb-1">Closed At</p>
-              <p className="text-sm font-medium text-white">
+              <p className="text-primary-100 text-sm mb-1" id="stat-closed-at-label">Closed At</p>
+              <p className="text-sm font-medium text-white" aria-labelledby="stat-closed-at-label">
                 {new Intl.DateTimeFormat('en', {
                   dateStyle: 'medium',
                   timeStyle: 'short',
@@ -259,7 +267,7 @@ export default function AdminDashboard() {
             </div>
           </div>
         ) : (
-          <p className="text-primary-100">Loading network stats...</p>
+          <p className="text-primary-100" role="status" aria-live="polite">Loading network stats...</p>
         )}
       </div>
     </div>
