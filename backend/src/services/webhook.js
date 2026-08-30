@@ -5,10 +5,17 @@ const db = require('../db');
 const { sign } = require('../utils/webhookSignature');
 const { validateOutboundUrl } = require('../utils/ssrf');
 const { decryptSecret } = require('../utils/symmetricEncryption');
+const { sign, buildSignatureHeader } = require('../utils/webhookSignature');
 const logger = require('../utils/logger');
+const { validatePublicUrl: isPublicHttpsUrl } = require('../utils/ssrf');
 
 const MAX_ATTEMPTS = 3;
 
+function sign(secret, payload) {
+  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
+}
+
+function httpsPost(url, body, signature) {
 /**
  * Perform a single HTTPS POST with the AfriPay webhook signature header.
  *
@@ -18,6 +25,39 @@ const MAX_ATTEMPTS = 3;
  * @param {import('https').Agent|undefined} agent - DNS-pinned agent (SSRF protection)
  * @returns {Promise<number>} Resolves with the HTTP status code on 2xx
  */
+async function isPublicHttpsUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== 'https:') {
+    return false;
+  }
+
+  const hostname = parsed.hostname;
+
+  // Reject bare private IPs
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) && isPrivateIp(hostname)) {
+    return false;
+  }
+
+  // Resolve and check returned IP
+  try {
+    const { address } = await require('dns').promises.lookup(hostname);
+    if (isPrivateIp(address)) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return true;
+}
+
+function httpsPost(url, body, signature) {
 function httpsPost(url, body, signature, agent) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
@@ -52,6 +92,43 @@ function httpsPost(url, body, signature, agent) {
   });
 }
 
+async function createDeliveryLog(webhookId, eventType, targetUrl, attempt, maxAttempts, payload) {
+  const { rows } = await db.query(
+    `INSERT INTO webhook_deliveries (webhook_id, event_type, target_url, status, attempt, max_attempts, payload)
+     VALUES ($1, $2, $3, 'pending', $4, $5, $6)
+     RETURNING id`,
+    [webhookId, eventType, targetUrl, attempt, maxAttempts, JSON.stringify(payload)]
+  );
+  return rows[0].id;
+}
+
+async function updateDeliveryLog(deliveryId, status, statusCode, responseTimeMs, errorMessage) {
+  await db.query(
+    `UPDATE webhook_deliveries
+     SET status = $1, status_code = $2, response_time_ms = $3, error_message = $4, completed_at = NOW()
+     WHERE id = $5`,
+    [status, statusCode || null, responseTimeMs || null, errorMessage || null, deliveryId]
+  );
+}
+
+// Build the list of plaintext secrets a delivery should be signed with: the
+// current secret, plus the previous one if it's still inside its rotation
+// overlap window — lets a merchant who hasn't rolled their verification key
+// yet keep validating deliveries sent right after a rotation.
+function activeSecrets(row) {
+  const secrets = [decryptSecret(row.secret)];
+  if (row.previous_secret && row.previous_secret_expires_at && new Date(row.previous_secret_expires_at) > new Date()) {
+    secrets.push(decryptSecret(row.previous_secret));
+  }
+  return secrets;
+}
+
+async function deliverWithRetry(webhookId, url, secrets, payload, attempt = 0) {
+  // Re-validate URL before each delivery to catch DNS rebinding / stale records
+  if (!await isPublicHttpsUrl(url)) {
+    logger.error('Webhook delivery blocked: URL failed SSRF validation', { url });
+    await createDeliveryLog(webhookId, payload.event, url, attempt + 1, MAX_ATTEMPTS, payload)
+      .then((id) => updateDeliveryLog(id, 'failed', null, null, 'SSRF validation failed'));
 /**
  * Deliver a webhook payload to a single subscriber URL with exponential-backoff retry.
  *
@@ -76,6 +153,9 @@ async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
   }
 
   const body = JSON.stringify(payload);
+  const signature = buildSignatureHeader(secrets, body);
+  const deliveryId = await createDeliveryLog(webhookId, payload.event, url, attempt + 1, MAX_ATTEMPTS, payload);
+  const start = Date.now();
   const signature = sign(secret, body);
 
   try {
@@ -103,8 +183,25 @@ async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
         attempts: MAX_ATTEMPTS,
         error: errMessage,
       });
+      await new Promise((r) => setTimeout(r, delay));
+      return deliverWithRetry(webhookId, url, secrets, payload, attempt + 1);
     }
   }
+}
+
+async function retryDelivery(deliveryId) {
+  const { rows } = await db.query(
+    `SELECT wd.webhook_id, wd.target_url, wd.payload, wd.event_type,
+            w.url, w.secret, w.previous_secret, w.previous_secret_expires_at
+     FROM webhook_deliveries wd
+     JOIN webhooks w ON w.id = wd.webhook_id
+     WHERE wd.id = $1 AND wd.status = 'failed'`,
+    [deliveryId]
+  );
+  if (!rows.length) throw new Error('Delivery not found or not failed');
+  const row = rows[0];
+  const parsedPayload = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+  await deliverWithRetry(row.webhook_id, row.url, activeSecrets(row), { ...parsedPayload, event: row.event_type });
 }
 
 /**
@@ -119,9 +216,13 @@ async function deliverWithRetry(webhookId, url, secret, payload, attempt = 0) {
  */
 async function deliver(event, data) {
   const { rows } = await db.query(
-    `SELECT id, url, secret FROM webhooks WHERE active = true AND $1 = ANY(events)`,
+    `SELECT id, url, secret, previous_secret, previous_secret_expires_at
+     FROM webhooks WHERE active = true AND $1 = ANY(events)`,
     [event]
   );
+  const timestamp = Math.floor(Date.now() / 1000);
+  const payload = { timestamp, event, data };
+  await Promise.all(rows.map((wh) => deliverWithRetry(wh.id, wh.url, activeSecrets(wh), payload)));
 
   if (!rows.length) return;
 

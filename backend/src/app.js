@@ -103,6 +103,7 @@ app.use((req, res, next) => {
 app.use('/api/auth/login', rateLimiters.authLimiter);
 app.use('/api/auth/register', rateLimiters.authLimiter);
 app.use('/api/payments/send', rateLimiters.paymentLimiter);
+app.use('/api/wallet/export-key', rateLimiters.exportKeyLimiter);
 app.use('/api/admin', rateLimiters.adminLimiter);
 app.use('/api', rateLimiters.readLimiter);
 
@@ -129,12 +130,19 @@ app.use('/api/ledger', ledgerRoutes);
 app.use('/api/contacts', contactsRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/tools', toolsRoutes);
-app.use('/api/dev', toolsRoutes); // legacy alias
 app.use('/api/assets', assetsRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/.well-known/stellar', sep10Routes);
 app.use('/api/sep10', sep10Routes);
 app.use('/api/sep31', sep31Routes);
+// BE-031: /api/dev is reserved exclusively for the env-gated developer router
+// below. A "legacy alias" that also mounted toolsRoutes at /api/dev used to
+// live here (removed) — its naming collision with this router was flagged as
+// a production-exposure risk: a future refactor reordering these two
+// app.use('/api/dev', ...) calls could accidentally make dev-only tooling
+// reachable in production. devRoutes is defense-in-depth gated twice: once
+// here (NODE_ENV !== 'production') and again inside routes/dev.js itself
+// (NODE_ENV !== 'development'), so it is a 404 in any non-development env.
 if (process.env.NODE_ENV !== 'production') {
   app.use('/api/dev', devRoutes);
 }
