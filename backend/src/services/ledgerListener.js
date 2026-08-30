@@ -12,13 +12,67 @@ const MAX_BACKOFF_MS = 60_000;
 const MAX_FAILURES_BEFORE_ALERT = 10;
 
 const activeStreams = new Map();
+// Last-known ledger sequence seen per stream key, derived from paging_token.
+// Used to detect gaps (missed ledgers) across a reconnect.
+const lastLedgerSeqByKey = new Map();
 let io = null;
 
 const healthState = {
   status: 'connected',
   last_event_at: null,
   reconnect_attempts: 0,
+  // Reconnect / gap metrics (BE-027)
+  total_reconnects: 0,
+  total_gaps_detected: 0,
+  last_gap_size: 0,
+  last_gap_at: null,
 };
+
+/**
+ * Horizon paging tokens for transaction/payment/effect streams encode the
+ * ledger sequence in the high 32 bits: token = (ledgerSeq << 32) | txOrder.
+ * Decoding it lets us detect missed ledgers across a reconnect without a
+ * separate ledgers() stream.
+ */
+function ledgerSeqFromPagingToken(pagingToken) {
+  try {
+    if (!pagingToken || pagingToken === 'now') return null;
+    return Number(BigInt(pagingToken) >> 32n);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compares the last ledger sequence seen before a disconnect to the first
+ * ledger sequence seen after reconnecting. Streams resume from the last
+ * persisted cursor (not "now"), so Horizon normally replays any events in
+ * between — this is a safety-net check for the case where that assumption
+ * doesn't hold (e.g. the cached cursor expired/was evicted and the stream
+ * fell back to "now").
+ */
+function checkForGap(key, newLedgerSeq) {
+  const previousSeq = lastLedgerSeqByKey.get(key);
+  if (previousSeq != null && newLedgerSeq != null && newLedgerSeq > previousSeq + 1) {
+    const gapSize = newLedgerSeq - previousSeq - 1;
+    healthState.total_gaps_detected += 1;
+    healthState.last_gap_size = gapSize;
+    healthState.last_gap_at = new Date().toISOString();
+    logger.error('Ledger gap detected after stream reconnect', {
+      key,
+      lastSeenLedger: previousSeq,
+      firstLedgerAfterReconnect: newLedgerSeq,
+      gapSize,
+    });
+    fireAlert(
+      `LedgerListener: detected a gap of ${gapSize} ledger(s) for ${key} ` +
+      `(last seen ${previousSeq}, resumed at ${newLedgerSeq}). Backfill via Horizon may be required.`
+    );
+  }
+  if (newLedgerSeq != null) {
+    lastLedgerSeqByKey.set(key, newLedgerSeq);
+  }
+}
 
 function setSocketIO(socketIO) {
   io = socketIO;
@@ -53,6 +107,7 @@ async function startStreamForAccount(publicKey, attempt = 0) {
   if (attempt > 0) {
     healthState.status = 'reconnecting';
     healthState.reconnect_attempts = attempt;
+    healthState.total_reconnects += 1;
     const delay = backoffMs(attempt - 1);
     logger.info('Reconnecting transaction stream', { publicKey, attempt, delayMs: delay });
     await new Promise((r) => setTimeout(r, delay));
@@ -78,6 +133,7 @@ async function startStreamForAccount(publicKey, attempt = 0) {
         healthState.last_event_at = new Date().toISOString();
         healthState.status = 'connected';
         healthState.reconnect_attempts = 0;
+        checkForGap(publicKey, ledgerSeqFromPagingToken(tx.paging_token));
         cache.set(`ledger:cursor:tx:${publicKey}`, tx.paging_token, 3600).catch(() => {});
         try {
           await db.query(
@@ -116,6 +172,7 @@ async function startPaymentStream(publicKey, attempt = 0) {
   if (activeStreams.has(key)) return;
 
   if (attempt > 0) {
+    healthState.total_reconnects += 1;
     const delay = backoffMs(attempt - 1);
     logger.info('Reconnecting payment stream', { publicKey, attempt, delayMs: delay });
     await new Promise((r) => setTimeout(r, delay));
@@ -139,6 +196,7 @@ async function startPaymentStream(publicKey, attempt = 0) {
     .stream({
       onmessage: async (payment) => {
         healthState.last_event_at = new Date().toISOString();
+        checkForGap(`${publicKey}:payments`, ledgerSeqFromPagingToken(payment.paging_token));
         cache.set(`ledger:cursor:pay:${publicKey}`, payment.paging_token, 3600).catch(() => {});
         if (payment.type !== 'payment' || payment.to !== publicKey) return;
         const amount = payment.amount;
