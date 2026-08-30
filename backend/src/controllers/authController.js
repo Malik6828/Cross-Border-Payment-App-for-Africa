@@ -668,6 +668,64 @@ async function verifyPIN(req, res, next) {
   }
 }
 
+async function registerBiometric(req, res, next) {
+  try {
+    const { credential_id, device_label } = req.body;
+    const userId = req.user.userId;
+
+    if (!credential_id || typeof credential_id !== 'string') {
+      return res.status(400).json({ error: 'credential_id is required' });
+    }
+
+    await db.query(
+      `INSERT INTO webauthn_credentials (user_id, credential_id, device_label)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (credential_id) DO NOTHING`,
+      [userId, credential_id, device_label || null]
+    );
+
+    res.json({ message: 'Biometric credential registered successfully' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function getBiometricStatus(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const result = await db.query(
+      `SELECT id, credential_id, device_label, created_at, last_used_at
+       FROM webauthn_credentials
+       WHERE user_id = $1 AND revoked_at IS NULL
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+
+    res.json({ registered: result.rows.length > 0, credentials: result.rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function disableBiometric(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const { credential_id } = req.body;
+
+    await db.query(
+      `UPDATE webauthn_credentials
+       SET revoked_at = NOW()
+       WHERE user_id = $1 AND revoked_at IS NULL
+       ${credential_id ? 'AND credential_id = $2' : ''}`,
+      credential_id ? [userId, credential_id] : [userId]
+    );
+
+    res.json({ message: 'Biometric credential(s) disabled' });
+  } catch (err) {
+    next(err);
+  }
+}
+
 async function refresh(req, res, next) {
   try {
     const raw = req.cookies?.[COOKIE_NAME];
@@ -1333,6 +1391,9 @@ module.exports = {
   uploadAvatar,
   setPIN,
   verifyPIN,
+  registerBiometric,
+  getBiometricStatus,
+  disableBiometric,
   setup2FA,
   verify2FA,
   disable2FA,

@@ -16,6 +16,9 @@ const {
   uploadAvatar,
   setPIN,
   verifyPIN,
+  registerBiometric,
+  getBiometricStatus,
+  disableBiometric,
   setup2FA,
   verify2FA,
   disable2FA,
@@ -144,6 +147,27 @@ router.post(
   [body('pin').matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits')],
   validate,
   verifyPIN
+);
+
+router.post(
+  '/biometric/register',
+  authMiddleware,
+  [
+    body('credential_id').notEmpty().withMessage('credential_id is required'),
+    body('device_label').optional().isString().trim(),
+  ],
+  validate,
+  registerBiometric
+);
+
+router.get('/biometric/status', authMiddleware, getBiometricStatus);
+
+router.post(
+  '/biometric/disable',
+  authMiddleware,
+  [body('credential_id').optional().isString()],
+  validate,
+  disableBiometric
 );
 
 router.post('/2fa/setup', authMiddleware, setup2FA);
