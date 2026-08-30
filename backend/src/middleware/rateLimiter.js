@@ -218,6 +218,24 @@ const readLimiter = rateLimit({
   },
 });
 
+// Wallet secret-key export: 3 req/15min per authenticated user — separate from the
+// general read limiter because exporting a decrypted Stellar secret key is one of
+// the highest-impact actions an account can take (#959).
+const WINDOW_15MIN = 15 * 60 * 1000;
+const exportKeyLimiter = rateLimit({
+  windowMs: WINDOW_15MIN,
+  max: 3,
+  keyGenerator: makeKeyByUser,
+  store: new RedisStore(WINDOW_15MIN, 'export-key'),
+  standardHeaders: false,
+  legacyHeaders: false,
+  handler(req, res, next, options) {
+    onLimitReached(req, res, options);
+    makeHeaders(req, res, { limit: options.max, remaining: 0, resetTime: new Date(Date.now() + options.windowMs) });
+    res.status(429).json({ error: 'Too many key export attempts. Please try again later.' });
+  },
+});
+
 // Admin endpoints: 30 req/min per admin user
 const adminLimiter = rateLimit({
   windowMs: WINDOW_1MIN,
@@ -251,6 +269,7 @@ module.exports = {
   paymentLimiter,
   readLimiter,
   adminLimiter,
+  exportKeyLimiter,
   RedisStore,
   getRateLimiterStatus,
 };

@@ -103,6 +103,7 @@ app.use((req, res, next) => {
 app.use('/api/auth/login', rateLimiters.authLimiter);
 app.use('/api/auth/register', rateLimiters.authLimiter);
 app.use('/api/payments/send', rateLimiters.paymentLimiter);
+app.use('/api/wallet/export-key', rateLimiters.exportKeyLimiter);
 app.use('/api/admin', rateLimiters.adminLimiter);
 app.use('/api', rateLimiters.readLimiter);
 

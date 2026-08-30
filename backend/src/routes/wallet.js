@@ -77,6 +77,7 @@ router.post(
     body('password').notEmpty().withMessage('Password is required'),
     body('wallet_id').optional().isUUID().withMessage('wallet_id must be a valid UUID'),
     body('totp_code').optional().trim().isLength({ min: 6, max: 6 }).withMessage('TOTP code must be 6 digits'),
+    body('pin').optional().matches(/^\d{4,6}$/).withMessage('PIN must be 4-6 digits'),
   ],
   validate,
   exportKey,
@@ -179,7 +180,6 @@ router.post(
   validate,
   upgradeToBusinessAccount,
 );
-router.get('/signers', listSigners);
 router.get('/signers', isAdminOrOwner(), listSigners);
 router.get('/signers/horizon', getSignersFromHorizon);
 router.post('/clear-inflation-destination', clearInflationDestinationHandler);

@@ -3,6 +3,7 @@ const rateLimit = require("express-rate-limit");
 const { body, validationResult } = require("express-validator");
 const authMiddleware = require("../middleware/auth");
 const kycUpload = require("../middleware/kycUpload");
+const scanUpload = require("../middleware/scanUpload");
 const { submitKYC, getKYCStatus } = require("../controllers/kycController");
 
 const validate = (req, res, next) => {
@@ -30,6 +31,8 @@ router.get("/status", getKYCStatus);
 
 router.post(
   "/submit",
+  upload,
+  scanUpload,
   kycSubmissionLimiter,
   kycUpload,
   [

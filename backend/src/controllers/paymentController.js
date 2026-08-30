@@ -23,6 +23,8 @@ const { checkVelocity, checkDailyLimit, checkFraud, logFraudBlock } = require(".
 const { withLock } = require("../utils/distributedLock");
 const { parseHistoryFrom, parseHistoryTo, normalizeAsset, validateDateRange } = require("../utils/historyQuery");
 const { isMemoRequired } = require("../services/memoRequired");
+const { awardReferralCredit } = require("./referralController");
+const { enqueueMint } = require("../services/loyaltyMintQueue");
 const { creditReferralReward } = require("../services/referralRewardService");
 const { enqueueLoyaltyMint } = require("../jobs/loyaltyMintJob");
 const { depositFee } = require("../services/feeDistributor");
@@ -484,6 +486,10 @@ async function send(req, res, next) {
       creditReferralReward(req.user.userId, txId).catch(() => {});
     }
 
+    const loyaltyPoints = Math.max(1, Math.floor(parseFloat(amount)));
+    enqueueMint({ userId: req.user.userId, walletAddress: public_key, points: loyaltyPoints }).catch((err) => {
+      logger.error('Failed to enqueue loyalty mint', { userId: req.user.userId, error: err.message });
+    });
     // Queue loyalty mint for background processing after confirmation
     enqueueLoyaltyMint(txId, req.user.userId, public_key, amount, asset).catch(() => {});
 
