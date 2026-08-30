@@ -1096,6 +1096,91 @@ async function getAuditLogs(req, res, next) {
   }
 }
 
+// BE-032: override an AML flag on a wallet/user.
+//
+// Every override is compliance-sensitive — it must be traceable to the admin
+// who made the call, with a timestamp and a mandatory free-text reason, in
+// case of a future regulatory audit or fraud investigation. `reason` is
+// required and validated (non-empty) at the route layer (see routes/admin.js)
+// *and* re-checked here as defense in depth. The override is persisted via
+// audit.auditLog() as an 'aml_override' entry — actor id/role and created_at
+// are captured automatically by auditLog, and reason + the override decision
+// are recorded in `new_value` for the compliance report endpoint below.
+async function overrideAmlFlag(req, res, next) {
+  try {
+    const { wallet_address, user_id, reason, new_status } = req.body;
+
+    if (!reason || typeof reason !== 'string' || !reason.trim()) {
+      const err = new Error('A non-empty reason is required to override an AML flag');
+      err.status = 400;
+      throw err;
+    }
+    if (!wallet_address && !user_id) {
+      const err = new Error('wallet_address or user_id is required');
+      err.status = 400;
+      throw err;
+    }
+
+    const resolvedStatus = new_status || 'cleared';
+
+    await audit.auditLog(req, 'aml_override', {
+      type: 'aml_flag',
+      id: wallet_address || user_id,
+      oldValue: { status: 'flagged' },
+      newValue: {
+        status: resolvedStatus,
+        reason: reason.trim(),
+        reviewing_admin_id: req.user.userId,
+        wallet_address: wallet_address || null,
+        user_id: user_id || null,
+      },
+    });
+
+    res.json({
+      success: true,
+      wallet_address: wallet_address || null,
+      user_id: user_id || null,
+      new_status: resolvedStatus,
+      reviewing_admin_id: req.user.userId,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/admin/aml/overrides?from=&to= — compliance report of every AML
+// override in a date range, sourced from the audit trail written above.
+async function getAmlOverrides(req, res, next) {
+  try {
+    const { from, to } = req.query;
+    const conditions = [`action = 'aml_override'`];
+    const params = [];
+
+    if (from) {
+      params.push(from);
+      conditions.push(`created_at >= $${params.length}`);
+    }
+    if (to) {
+      params.push(to);
+      conditions.push(`created_at <= $${params.length}`);
+    }
+
+    const { rows } = await db.query(
+      `SELECT id, user_id AS reviewing_admin_id, actor_role, resource_id,
+              old_value, new_value, created_at
+       FROM audit_logs
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY created_at DESC
+       LIMIT 500`,
+      params
+    );
+
+    res.json({ data: rows });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   getStats,
   getUsers,
@@ -1124,4 +1209,7 @@ module.exports = {
   bulkKycUpdate,
   // #698
   getAuditLogs,
+  // #979 (BE-032)
+  overrideAmlFlag,
+  getAmlOverrides,
 };
