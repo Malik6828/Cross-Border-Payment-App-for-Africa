@@ -33,7 +33,7 @@ const webpush = require('./services/webpush');
 const db = require('./db');
 const app = require('./app');
 const { initStreams } = require('./services/horizonWorker');
-const { detectTestnetReset } = require('./services/stellar');
+const { detectTestnetReset, startFallbackDurationMonitor } = require('./services/stellar');
 const { initEmailQueue, drainEmailQueue } = require('./services/email');
 const { startPriceRefreshJob } = require('./services/priceOracle');
 const { syncOfferEvents } = require('./jobs/syncOfferEvents');
@@ -53,6 +53,7 @@ const server = app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`, { port: PORT });
   initStreams();
   startScheduler();
+  startFallbackDurationMonitor(); // BE-036: alert if Horizon fallback stays active too long
 
   // Warn if testnet was reset since last startup
   if (process.env.NODE_ENV !== 'production') {
