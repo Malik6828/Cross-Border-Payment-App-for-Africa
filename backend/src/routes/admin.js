@@ -37,6 +37,7 @@ const {
   createFeeConfig,
   updateFeeConfig,
   listHistory,
+  previewFeeConfigChange,
 } = require('../controllers/feeConfigController');
 
 const validate = (req, res, next) => {
@@ -293,6 +294,67 @@ router.get('/fee-configs', listConfigs);
  *         description: Admin access required
  */
 router.get('/fee-configs/history', listHistory);
+
+/**
+ * @openapi
+ * /api/admin/fee-configs/preview:
+ *   post:
+ *     summary: Simulate a proposed fee config against recent transaction volume (admin only)
+ *     description: >
+ *       Applies a proposed fee config against historical transaction volume
+ *       (default last 7 days) and returns the estimated fee-revenue delta
+ *       versus what actually happened. Does not modify any data.
+ *     tags: [Admin]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [fee_type, asset_code, fee_bps, max_fee_usdc, min_fee_usdc]
+ *             properties:
+ *               fee_type:
+ *                 type: string
+ *                 enum: [platform, referral, loyalty_redemption]
+ *               asset_code:
+ *                 type: string
+ *               fee_bps:
+ *                 type: integer
+ *                 maximum: 1000
+ *               max_fee_usdc:
+ *                 type: number
+ *               min_fee_usdc:
+ *                 type: number
+ *               lookback_days:
+ *                 type: integer
+ *                 description: Historical window to simulate against (default 7, max 90)
+ *     responses:
+ *       200:
+ *         description: Simulated fee-revenue delta
+ *       400:
+ *         description: Validation error
+ *       403:
+ *         description: Admin access required
+ */
+router.post(
+  '/fee-configs/preview',
+  [
+    body('fee_type')
+      .notEmpty().withMessage('fee_type is required')
+      .isIn(['platform', 'referral', 'loyalty_redemption']).withMessage('fee_type must be one of: platform, referral, loyalty_redemption'),
+    body('asset_code').notEmpty().withMessage('asset_code is required').trim().isLength({ max: 12 }),
+    body('fee_bps')
+      .notEmpty().withMessage('fee_bps is required')
+      .isInt({ min: 0, max: 1000 }).withMessage('fee_bps must be between 0 and 1000'),
+    body('max_fee_usdc').notEmpty().withMessage('max_fee_usdc is required').isFloat({ min: 0 }),
+    body('min_fee_usdc').notEmpty().withMessage('min_fee_usdc is required').isFloat({ min: 0 }),
+    body('lookback_days').optional().isInt({ min: 1, max: 90 }),
+  ],
+  validate,
+  previewFeeConfigChange
+);
 
 /**
  * @openapi
