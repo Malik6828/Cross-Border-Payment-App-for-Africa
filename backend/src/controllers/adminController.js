@@ -702,12 +702,12 @@ async function indexContractEventsEndpoint(req, res, next) {
 // ---------------------------------------------------------------------------
 // Fraud Rule Engine (#690)
 // ---------------------------------------------------------------------------
-const { loadRules, invalidateRulesCache } = require('../services/fraudDetection');
+const { loadRules, invalidateRulesCache, getShadowRuleReport } = require('../services/fraudDetection');
 
 async function getFraudRules(req, res, next) {
   try {
     const { rows } = await db.query(
-      `SELECT id, name, rule_type, parameters, is_active, created_at FROM fraud_rules ORDER BY created_at ASC`
+      `SELECT id, name, rule_type, parameters, is_active, mode, created_at FROM fraud_rules ORDER BY created_at ASC`
     );
     res.json(rows);
   } catch (err) {
@@ -717,15 +717,19 @@ async function getFraudRules(req, res, next) {
 
 async function createFraudRule(req, res, next) {
   try {
-    const { name, rule_type, parameters } = req.body;
+    const { name, rule_type, parameters, mode } = req.body;
+    // BE-033: new rules default to 'shadow' unless explicitly created as
+    // 'active', so a rule can be validated against live traffic (logged, not
+    // enforced) before an admin promotes it via updateFraudRule.
+    const ruleMode = mode === 'active' ? 'active' : 'shadow';
     const { rows } = await db.query(
-      `INSERT INTO fraud_rules (name, rule_type, parameters)
-       VALUES ($1, $2, $3) RETURNING *`,
-      [name, rule_type, JSON.stringify(parameters)]
+      `INSERT INTO fraud_rules (name, rule_type, parameters, mode)
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [name, rule_type, JSON.stringify(parameters), ruleMode]
     );
     await invalidateRulesCache();
     await audit.log(req.user.userId, 'fraud_rule_created', req.ip, req.headers['user-agent'],
-      { rule_name: name, rule_type });
+      { rule_name: name, rule_type, mode: ruleMode });
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Rule name already exists' });
@@ -736,21 +740,39 @@ async function createFraudRule(req, res, next) {
 async function updateFraudRule(req, res, next) {
   try {
     const { id } = req.params;
-    const { name, parameters, is_active } = req.body;
+    const { name, parameters, is_active, mode } = req.body;
+    if (mode !== undefined && mode !== 'shadow' && mode !== 'active') {
+      const err = new Error("mode must be 'shadow' or 'active'");
+      err.status = 400;
+      throw err;
+    }
     const { rows } = await db.query(
       `UPDATE fraud_rules
        SET name = COALESCE($1, name),
            parameters = COALESCE($2, parameters),
            is_active = COALESCE($3, is_active),
+           mode = COALESCE($4, mode),
            updated_at = NOW()
-       WHERE id = $4 RETURNING *`,
-      [name || null, parameters ? JSON.stringify(parameters) : null, is_active ?? null, id]
+       WHERE id = $5 RETURNING *`,
+      [name || null, parameters ? JSON.stringify(parameters) : null, is_active ?? null, mode || null, id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Rule not found' });
     await invalidateRulesCache();
     await audit.log(req.user.userId, 'fraud_rule_updated', req.ip, req.headers['user-agent'],
       { rule_id: id, changes: req.body });
     res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+}
+
+// GET /api/admin/fraud-rules/shadow-report — BE-033 admin view comparing
+// shadow-rule outcomes (would-block vs would-pass) before promoting a rule.
+async function getFraudShadowReport(req, res, next) {
+  try {
+    const sinceDays = Math.min(90, parseInt(req.query.days, 10) || 7);
+    const report = await getShadowRuleReport(sinceDays);
+    res.json({ since_days: sinceDays, rules: report });
   } catch (err) {
     next(err);
   }
@@ -1201,6 +1223,8 @@ module.exports = {
   getFraudRules,
   createFraudRule,
   updateFraudRule,
+  // #980 (BE-033)
+  getFraudShadowReport,
   // #692
   bulkSuspend,
   bulkUnsuspend,

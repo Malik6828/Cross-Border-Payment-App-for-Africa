@@ -24,6 +24,7 @@ const {
   getFraudRules,
   createFraudRule,
   updateFraudRule,
+  getFraudShadowReport,
   bulkSuspend,
   bulkUnsuspend,
   bulkExport,
@@ -199,6 +200,8 @@ router.post('/fraud-rules',
     body('name').trim().notEmpty().isLength({ max: 100 }),
     body('rule_type').isIn(['velocity', 'amount', 'daily_limit']),
     body('parameters').isObject(),
+    // BE-033: optional at creation — defaults to 'shadow' in the controller.
+    body('mode').optional().isIn(['shadow', 'active']),
   ],
   validate,
   createFraudRule
@@ -209,10 +212,15 @@ router.patch('/fraud-rules/:id',
     body('name').optional().trim().isLength({ max: 100 }),
     body('parameters').optional().isObject(),
     body('is_active').optional().isBoolean(),
+    body('mode').optional().isIn(['shadow', 'active']),
   ],
   validate,
   updateFraudRule
 );
+
+// BE-033: compare shadow-rule outcomes (would-block vs would-pass) before
+// promoting a rule from 'shadow' to 'active'.
+router.get('/fraud-rules/shadow-report', getFraudShadowReport);
 
 // ---------------------------------------------------------------------------
 // Bulk User Management (#692)
