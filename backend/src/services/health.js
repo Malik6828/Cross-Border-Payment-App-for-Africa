@@ -1,6 +1,7 @@
 const db = require('../db');
 const { withTimeout } = require('../utils/withTimeout');
 const stellar = require('./stellar');
+const { getAnchorHealth } = require('./anchor');
 const { getClient: getRedisClient } = require('../utils/cache');
 const logger = require('../utils/logger');
 const { getRateLimiterStatus } = require('../middleware/rateLimiter');
@@ -101,6 +102,7 @@ async function runHealthChecks() {
 
   const ok = dbOk && stellarOk;
   const poolStats = db.getPoolStats();
+  const anchor = getAnchorHealth();
 
   return {
     status: ok ? 'ok' : 'degraded',
@@ -111,6 +113,10 @@ async function runHealthChecks() {
       total: poolStats.total,
       idle: poolStats.idle,
       waiting: poolStats.waiting,
+    },
+    anchor: {
+      status: anchor.circuitOpen ? 'down' : 'ok',
+      consecutiveFailures: anchor.consecutiveFailures,
     },
   };
 }

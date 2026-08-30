@@ -6,9 +6,15 @@ const { sign } = require('../utils/webhookSignature');
 const { validateOutboundUrl } = require('../utils/ssrf');
 const { decryptSecret } = require('../utils/symmetricEncryption');
 const logger = require('../utils/logger');
+const { validatePublicUrl: isPublicHttpsUrl } = require('../utils/ssrf');
 
 const MAX_ATTEMPTS = 3;
 
+function sign(secret, payload) {
+  return crypto.createHmac('sha256', secret).update(payload).digest('hex');
+}
+
+function httpsPost(url, body, signature) {
 /**
  * Perform a single HTTPS POST with the AfriPay webhook signature header.
  *

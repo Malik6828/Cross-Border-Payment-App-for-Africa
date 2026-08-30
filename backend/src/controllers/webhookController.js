@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../db');
+const { validatePublicUrl } = require('../utils/ssrf');
 const { validatePublicUrl } = require('../utils/ssrfValidator');
 const { validateOutboundUrl } = require('../utils/ssrf');
 const { encryptSecret, decryptSecret } = require('../utils/symmetricEncryption');

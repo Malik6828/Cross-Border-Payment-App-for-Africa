@@ -35,6 +35,11 @@ const wsConnections = new client.Gauge({
   registers: [registry],
 });
 
+const anchorPollDuration = new client.Histogram({
+  name: 'anchor_poll_duration_seconds',
+  help: 'Anchor transaction-status poll duration in seconds, per anchor',
+  labelNames: ['anchor', 'success'],
+  buckets: [0.05, 0.1, 0.3, 0.5, 1, 2, 5, 10],
 const paymentsTotal = new client.Counter({
   name: 'afripay_payments_total',
   help: 'Total payment state changes',
@@ -102,6 +107,7 @@ module.exports = {
   horizonRequestDuration,
   dbQueryDuration,
   wsConnections,
+  anchorPollDuration,
   paymentsTotal,
   paymentAmountUsdc,
   afripayHorizonDuration,

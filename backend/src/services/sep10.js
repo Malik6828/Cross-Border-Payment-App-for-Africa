@@ -1,3 +1,16 @@
+/**
+ * SEP-10 web-auth challenge/response.
+ *
+ * home_domain matching rule (see BE-014):
+ * The challenge transaction's manage_data operation name MUST be exactly
+ * `${HOME_DOMAIN} auth` — an EXACT, CASE-SENSITIVE string comparison against
+ * the server's configured home domain. No substring, prefix, or suffix match
+ * is permitted, and the domain is never normalized (no case-folding, no
+ * trailing-dot stripping) before comparison, because doing so would let a
+ * client authenticate a transaction whose operation name reads e.g.
+ * `afripay.app.attacker.com auth`, `AfriPay.App auth`, or `afripay.app. auth`
+ * as if it were `afripay.app auth`. Any deviation is rejected.
+ */
 'use strict';
 
 const StellarSDK = require('@stellar/stellar-sdk');
@@ -20,6 +33,7 @@ if (SEP10_SIGNING_SECRET) {
   SERVER_KEYPAIR = StellarSDK.Keypair.random();
 }
 const CHALLENGE_TIMEOUT = 15 * 60 * 1000; // 15 minutes
+const HOME_DOMAIN = process.env.SEP10_HOME_DOMAIN || 'afripay.app';
 const EXPIRY_BUFFER_SECONDS = 60; // refresh if token expires within 60s
 const SEP10_TOKEN_TTL = 24 * 60 * 60; // 24h default anchor token lifetime
 
@@ -43,6 +57,8 @@ function generateChallenge(clientPublicKey) {
   )
     .addOperation(
       StellarSDK.Operation.manageData({
+        name: `${HOME_DOMAIN} auth`,
+        value: crypto.randomBytes(32).toString('hex')
         name: 'challenge',
         value: crypto.randomBytes(32).toString('hex'),
       })
@@ -56,6 +72,24 @@ function generateChallenge(clientPublicKey) {
 
 function verifyChallenge(clientPublicKey, signedXDR) {
   try {
+    const transaction = StellarSDK.TransactionEnvelope.fromXDR(
+      signedXDR,
+      process.env.STELLAR_NETWORK === 'mainnet'
+        ? StellarSDK.Networks.PUBLIC_NETWORK_PASSPHRASE
+        : StellarSDK.Networks.TESTNET_NETWORK_PASSPHRASE
+    );
+
+    const tx = transaction.transaction();
+
+    // Exact, case-sensitive match on the manage_data operation name against
+    // the configured home domain. Reject anything that merely contains,
+    // starts with, or ends with the expected value (sub-domain spoofing,
+    // trailing-dot spoofing, case-mismatch spoofing).
+    const expectedName = `${HOME_DOMAIN} auth`;
+    const manageDataOp = (tx.operations || []).find(op => op.type === 'manageData');
+    if (!manageDataOp || manageDataOp.name !== expectedName) return false;
+
+    // Verify server signed it
     const transaction = StellarSDK.TransactionBuilder.fromXDR(signedXDR, networkPassphrase());
 
     const serverSigned = transaction.signatures.some(sig => {
@@ -166,6 +200,8 @@ function _withLock(key, fn) {
 module.exports = {
   generateChallenge,
   verifyChallenge,
+  SERVER_KEYPAIR,
+  HOME_DOMAIN
   storeSession,
   getSession,
   deleteSession,
