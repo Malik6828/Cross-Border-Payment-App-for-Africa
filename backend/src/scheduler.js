@@ -17,9 +17,11 @@ const EXPIRY_CRON         = process.env.CRON_CLAIMABLE_EXPIRY      || '*/15 * * 
 const OFFER_SYNC_CRON     = process.env.CRON_OFFER_SYNC            || '*/2 * * * *'; // every 2 minutes
 const PUSH_RETRY_CRON     = process.env.CRON_PUSH_RETRY            || '* * * * *';   // every 60 seconds
 const { checkKycDocumentExpiry } = require('./jobs/kycExpiryJob');
+const { processLoyaltyMintQueue } = require('./jobs/loyaltyMintJob');
 
 const KYC_EXPIRY_CRON      = process.env.CRON_KYC_EXPIRY            || '0 0 * * *';   // daily at midnight
 const ANALYTICS_REFRESH_CRON = process.env.CRON_ANALYTICS_REFRESH   || '0 * * * *';   // hourly
+const LOYALTY_MINT_CRON    = process.env.CRON_LOYALTY_MINT          || '* * * * *';   // every minute
 const FEE_CONFIG_ACTIVATE_CRON = process.env.CRON_FEE_CONFIG_ACTIVATE || '* * * * *'; // every minute
 const NOTIFICATION_CLEANUP_CRON = process.env.CRON_NOTIFICATION_CLEANUP || '0 2 * * *'; // daily at 2 AM
 const LOYALTY_MINT_CRON = process.env.CRON_LOYALTY_MINT || '* * * * *'; // every minute
@@ -61,10 +63,13 @@ function startScheduler() {
   cron.schedule(KYC_EXPIRY_CRON, safeJob('kycExpiryJob', checkKycDocumentExpiry));
   logger.info('KYC document expiry job registered', { cron: KYC_EXPIRY_CRON });
 
+  cron.schedule(LOYALTY_MINT_CRON, safeJob('loyaltyMintJob', processLoyaltyMintQueue));
+  logger.info('Loyalty mint queue job registered', { cron: LOYALTY_MINT_CRON });
+
+  const { refreshDailyAggregates } = require('./services/analyticsRefresh');
   cron.schedule(ANALYTICS_REFRESH_CRON, safeJob('analyticsMatViewRefresh', async () => {
-    const db = require('./db');
-    await db.query('REFRESH MATERIALIZED VIEW CONCURRENTLY daily_payment_aggregates');
-    logger.info('daily_payment_aggregates materialized view refreshed');
+    const refreshedAt = await refreshDailyAggregates();
+    logger.info('daily_payment_aggregates materialized view refreshed', { refreshedAt });
   }));
   logger.info('Analytics materialized view refresh job registered', { cron: ANALYTICS_REFRESH_CRON });
 
