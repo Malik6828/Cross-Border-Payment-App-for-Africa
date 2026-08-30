@@ -19,6 +19,13 @@ const {
 } = require('../utils/tokens');
 const { setCsrfCookie } = require('../middleware/csrf');
 const cache = require('../utils/cache');
+const {
+  getRpConfig,
+  generateRegistrationOptions,
+  verifyRegistrationResponse,
+  generateAuthenticationOptions,
+  verifyAuthenticationResponse,
+} = require('../services/webauthn');
 
 const { sendOTP } = require('../services/sms');
 const { recordSession, invalidateOtherSessions } = require('./sessionController');
@@ -26,6 +33,7 @@ const { recordSession, invalidateOtherSessions } = require('./sessionController'
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — email verification tokens
 const PASSWORD_RESET_TTL_MS = 60 * 60 * 1000;
 const PHONE_OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60; // 5 minutes
 
 const FORGOT_PASSWORD_MESSAGE = {
   message:
@@ -1066,6 +1074,231 @@ async function uploadAvatar(req, res, next) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// WebAuthn / biometric credentials (#953)
+//
+// The frontend's PIN setup flow calls navigator.credentials.create() and, until
+// now, only stored the resulting credential ID in localStorage — nothing on the
+// server verified the attestation or kept the public key, so "biometric login"
+// could not actually be cryptographically verified. These four endpoints make
+// the server the source of truth: register/verify an attestation at setup time,
+// then issue/verify an assertion challenge to log in.
+// ---------------------------------------------------------------------------
+
+async function webauthnRegisterOptions(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const userResult = await db.query('SELECT email, full_name FROM users WHERE id = $1', [userId]);
+    if (!userResult.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const { email, full_name } = userResult.rows[0];
+
+    const existing = await db.query('SELECT credential_id FROM webauthn_credentials WHERE user_id = $1', [userId]);
+    const { rpName, rpID } = getRpConfig();
+
+    const options = await generateRegistrationOptions({
+      rpName,
+      rpID,
+      userID: new TextEncoder().encode(userId),
+      userName: email,
+      userDisplayName: full_name || email,
+      attestationType: 'none',
+      excludeCredentials: existing.rows.map((r) => ({ id: r.credential_id })),
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' },
+    });
+
+    await cache.set(`webauthn:reg:${userId}`, options.challenge, WEBAUTHN_CHALLENGE_TTL_SECONDS);
+    res.json(options);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function webauthnRegister(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const expectedChallenge = await cache.get(`webauthn:reg:${userId}`);
+    if (!expectedChallenge) {
+      return res.status(400).json({ error: 'Registration challenge expired or not found. Please try again.' });
+    }
+    const { rpID, origin } = getRpConfig();
+
+    let verification;
+    try {
+      verification = await verifyRegistrationResponse({
+        response: req.body,
+        expectedChallenge,
+        expectedOrigin: origin,
+        expectedRPID: rpID,
+      });
+    } catch (err) {
+      logger.warn('WebAuthn registration verification failed', { userId, error: err.message });
+      return res.status(400).json({ error: 'WebAuthn registration could not be verified' });
+    }
+
+    if (!verification.verified || !verification.registrationInfo) {
+      return res.status(400).json({ error: 'WebAuthn registration could not be verified' });
+    }
+
+    const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+
+    await db.query(
+      `INSERT INTO webauthn_credentials
+         (id, user_id, credential_id, public_key, counter, device_type, backed_up, transports)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        uuidv4(),
+        userId,
+        credential.id,
+        Buffer.from(credential.publicKey).toString('base64'),
+        credential.counter,
+        credentialDeviceType,
+        credentialBackedUp,
+        JSON.stringify(credential.transports || req.body?.response?.transports || []),
+      ]
+    );
+    await cache.del(`webauthn:reg:${userId}`);
+
+    audit.log(userId, 'webauthn_credential_registered', req.ip, req.headers['user-agent'], {
+      credential_id: credential.id,
+    });
+
+    res.status(201).json({ message: 'Biometric credential registered' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function webauthnLoginOptions(req, res, next) {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'email is required' });
+
+    const userResult = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+    const { rpID } = getRpConfig();
+
+    // Don't reveal whether the account exists or has credentials registered —
+    // an empty allowCredentials list still yields a valid (but unusable) challenge.
+    let allowCredentials = [];
+    if (userResult.rows[0]) {
+      const creds = await db.query(
+        'SELECT credential_id, transports FROM webauthn_credentials WHERE user_id = $1',
+        [userResult.rows[0].id]
+      );
+      allowCredentials = creds.rows.map((r) => ({
+        id: r.credential_id,
+        transports: r.transports || undefined,
+      }));
+    }
+
+    const options = await generateAuthenticationOptions({
+      rpID,
+      userVerification: 'required',
+      allowCredentials,
+    });
+
+    await cache.set(`webauthn:auth:${email}`, options.challenge, WEBAUTHN_CHALLENGE_TTL_SECONDS);
+    res.json(options);
+  } catch (err) {
+    next(err);
+  }
+}
+
+async function webauthnVerify(req, res, next) {
+  try {
+    const { email, response } = req.body;
+    if (!email || !response) return res.status(400).json({ error: 'email and response are required' });
+
+    const expectedChallenge = await cache.get(`webauthn:auth:${email}`);
+    if (!expectedChallenge) {
+      return res.status(400).json({ error: 'Authentication challenge expired or not found. Please try again.' });
+    }
+
+    const userResult = await db.query(
+      `SELECT u.id, u.full_name, u.email, u.role, w.public_key
+       FROM users u LEFT JOIN wallets w ON w.user_id = u.id
+       WHERE u.email = $1`,
+      [email]
+    );
+    const user = userResult.rows[0];
+    if (!user) {
+      return res.status(401).json({ error: 'WebAuthn verification failed' });
+    }
+
+    const credRow = await db.query(
+      'SELECT id, credential_id, public_key, counter FROM webauthn_credentials WHERE user_id = $1 AND credential_id = $2',
+      [user.id, response.id]
+    );
+    if (!credRow.rows[0]) {
+      audit.log(user.id, 'webauthn_login_failure', req.ip, req.headers['user-agent'], { reason: 'unknown_credential' });
+      return res.status(401).json({ error: 'WebAuthn verification failed' });
+    }
+    const credential = credRow.rows[0];
+    const storedCounter = Number(credential.counter);
+
+    const { rpID, origin } = getRpConfig();
+    let verification;
+    try {
+      verification = await verifyAuthenticationResponse({
+        response,
+        expectedChallenge,
+        expectedOrigin: origin,
+        expectedRPID: rpID,
+        credential: {
+          id: credential.credential_id,
+          publicKey: Uint8Array.from(Buffer.from(credential.public_key, 'base64')),
+          counter: storedCounter,
+        },
+      });
+    } catch (err) {
+      audit.log(user.id, 'webauthn_login_failure', req.ip, req.headers['user-agent'], { reason: err.message });
+      return res.status(401).json({ error: 'WebAuthn verification failed' });
+    }
+
+    // Reject a replayed/cloned authenticator — the signature counter must strictly
+    // increase (authenticators reporting 0 for both sides don't support counters).
+    const newCounter = verification.authenticationInfo?.newCounter ?? 0;
+    if (!verification.verified || (newCounter !== 0 && newCounter <= storedCounter)) {
+      audit.log(user.id, 'webauthn_login_failure', req.ip, req.headers['user-agent'], {
+        reason: 'counter_replay',
+        credential_id: credential.credential_id,
+      });
+      return res.status(401).json({ error: 'WebAuthn verification failed' });
+    }
+
+    await db.query('UPDATE webauthn_credentials SET counter = $1, last_used_at = NOW() WHERE id = $2', [
+      newCounter,
+      credential.id,
+    ]);
+    await cache.del(`webauthn:auth:${email}`);
+
+    const token = signAccessToken({ userId: user.id, email: user.email, role: user.role });
+    const { raw, hash } = generateRefreshToken();
+    const expiresAt = refreshTokenExpiresAt();
+    const familyId = uuidv4();
+    await db.query(
+      `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at, family_id, revoked)
+       VALUES ($1, $2, $3, $4, $5, FALSE)`,
+      [uuidv4(), user.id, hash, expiresAt, familyId]
+    );
+    await recordSession(user.id, token, req).catch(() => {});
+    res.cookie(COOKIE_NAME, raw, COOKIE_OPTIONS);
+    setCsrfCookie(res);
+    audit.log(user.id, 'webauthn_login_success', req.ip, req.headers['user-agent']);
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        full_name: user.full_name,
+        email: user.email,
+        wallet_address: user.public_key,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   register,
   login,
@@ -1090,4 +1323,8 @@ module.exports = {
   getBackupCodeCount,
   changePassword,
   validateResetToken,
+  webauthnRegisterOptions,
+  webauthnRegister,
+  webauthnLoginOptions,
+  webauthnVerify,
 };

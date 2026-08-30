@@ -25,6 +25,10 @@ const {
   getBackupCodeCount,
   changePassword,
   validateResetToken,
+  webauthnRegisterOptions,
+  webauthnRegister,
+  webauthnLoginOptions,
+  webauthnVerify,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
 const geoRestriction = require('../middleware/geoRestriction');
@@ -197,6 +201,17 @@ router.post(
   avatarUpload.single('avatar'),
   uploadAvatar
 );
+
+// WebAuthn / biometric credentials
+router.post('/webauthn/register/options', authMiddleware, webauthnRegisterOptions);
+router.post('/webauthn/register', authMiddleware, webauthnRegister);
+router.post(
+  '/webauthn/verify/options',
+  [body('email').isEmail().normalizeEmail()],
+  validate,
+  webauthnLoginOptions
+);
+router.post('/webauthn/verify', webauthnVerify);
 
 // Session management
 router.get('/sessions', authMiddleware, listSessions);

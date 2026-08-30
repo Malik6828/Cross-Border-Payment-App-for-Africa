@@ -74,6 +74,7 @@ module.exports = { validateCallbackUrl, deliverCallback, MAX_ATTEMPTS };
 const crypto = require('crypto');
 const db = require('../db');
 const logger = require('../utils/logger');
+const metrics = require('../utils/metrics');
 
 const PRIVATE_IP_PATTERN = /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|169\.254\.|::1|fc|fd)/;
 const MAX_ATTEMPTS = 5;
@@ -102,12 +103,18 @@ async function deliverCallback(transaction, attempt = 1) {
   const { id, callback_url, shared_secret, status, status_message, stellar_transaction_id, refunded } = transaction;
   if (!callback_url) return;
 
+  if (!shared_secret) {
+    logger.error('SEP-31 callback skipped: missing shared_secret', { txId: id, callback_url });
+    metrics.sep31CallbackSkippedTotal.inc({ reason: 'missing_shared_secret' });
+    return;
+  }
+
   const body = { id, status };
   if (status_message) body.status_message = status_message;
   if (stellar_transaction_id) body.stellar_transaction_id = stellar_transaction_id;
   if (refunded) body.refunded = refunded;
 
-  const signature = signPayload(body, shared_secret || '');
+  const signature = signPayload(body, shared_secret);
   const start = Date.now();
   let httpStatus = null;
 

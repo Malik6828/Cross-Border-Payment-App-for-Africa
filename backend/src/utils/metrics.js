@@ -101,6 +101,13 @@ const rateLimiterRedisFailuresTotal = new client.Counter({
   registers: [registry],
 });
 
+const sep31CallbackSkippedTotal = new client.Counter({
+  name: 'afripay_sep31_callback_skipped_total',
+  help: 'Total SEP-31 callbacks skipped instead of being delivered, labelled by reason',
+  labelNames: ['reason'],
+  registers: [registry],
+});
+
 module.exports = {
   registry,
   httpRequestDuration,
@@ -117,4 +124,5 @@ module.exports = {
   amlScreeningCoverageGauge,
   rateLimiterDegraded,
   rateLimiterRedisFailuresTotal,
+  sep31CallbackSkippedTotal,
 };
