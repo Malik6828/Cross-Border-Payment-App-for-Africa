@@ -25,6 +25,7 @@ const {
   getBackupCodeCount,
   changePassword,
   validateResetToken,
+  revokeDeviceTrust,
 } = require('../controllers/authController');
 const authMiddleware = require('../middleware/auth');
 const geoRestriction = require('../middleware/geoRestriction');
@@ -202,5 +203,8 @@ router.post(
 router.get('/sessions', authMiddleware, listSessions);
 router.delete('/sessions', authMiddleware, revokeAllSessions);
 router.delete('/sessions/:id', authMiddleware, revokeSession);
+
+// Device trust (issue #995) — clears the httpOnly device-trust cookie.
+router.delete('/device-trust', authMiddleware, revokeDeviceTrust);
 
 module.exports = router;

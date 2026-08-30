@@ -11,6 +11,8 @@ const { generateSecret, verifyToken, generateBackupCodes, useBackupCode, hashBac
 const {
   COOKIE_NAME,
   COOKIE_OPTIONS,
+  DEVICE_COOKIE_NAME,
+  DEVICE_COOKIE_OPTIONS,
   signAccessToken,
   generateRefreshToken,
   refreshTokenExpiresAt,
@@ -176,7 +178,10 @@ async function register(req, res, next) {
 async function login(req, res, next) {
   try {
     const { email, password, totp_code, rememberDevice } = req.body;
-    const incomingDeviceToken = req.headers['x-device-token'];
+    // Device-trust token now travels as an httpOnly cookie (issue #995), not a
+    // client-readable header/localStorage value. Header kept as a legacy fallback
+    // for callers that haven't migrated yet.
+    const incomingDeviceToken = req.cookies?.[DEVICE_COOKIE_NAME] || req.headers['x-device-token'];
 
     const result = await db.query(
       `SELECT u.id, u.full_name, u.email, u.password_hash, u.email_verified, u.role,
@@ -331,6 +336,11 @@ async function login(req, res, next) {
 
     res.cookie(COOKIE_NAME, raw, COOKIE_OPTIONS);
     setCsrfCookie(res);
+    // Set the device-trust token as an httpOnly cookie instead of returning it in the
+    // JSON body — the frontend no longer stores it in localStorage (issue #995).
+    if (device_token) {
+      res.cookie(DEVICE_COOKIE_NAME, device_token, DEVICE_COOKIE_OPTIONS);
+    }
     audit.log(user.id, 'login_success', req.ip, req.headers['user-agent']);
     res.json({
       token,
@@ -341,7 +351,6 @@ async function login(req, res, next) {
         wallet_address: user.public_key,
         phone_verified: user.phone_verified,
       },
-      ...(device_token && { device_token }),
     });
   } catch (err) {
     next(err);
@@ -1046,11 +1055,25 @@ async function uploadAvatar(req, res, next) {
   }
 }
 
+/**
+ * Clear the httpOnly device-trust cookie (issue #995). Replaces the old
+ * client-side `localStorage.removeItem('afripay_device_token')` flow.
+ */
+async function revokeDeviceTrust(req, res, next) {
+  try {
+    res.clearCookie(DEVICE_COOKIE_NAME, { ...DEVICE_COOKIE_OPTIONS, maxAge: undefined });
+    res.json({ message: 'Device trust revoked' });
+  } catch (err) {
+    next(err);
+  }
+}
+
 module.exports = {
   register,
   login,
   refresh,
   logout,
+  revokeDeviceTrust,
   verifyEmail,
   verifyPhone,
   getMe,
