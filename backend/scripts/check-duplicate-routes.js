@@ -15,12 +15,7 @@ const ROUTES_DIR = path.join(__dirname, '..', 'src', 'routes');
 
 // file (relative to src/routes) -> Set of "METHOD path" pairs known to be
 // duplicated already, tracked by a separate issue.
-const ALLOWLIST = {
-  // GET /signers is registered twice: once without auth, once with
-  // isAdminOrOwner(). The unprotected copy wins silently — a real auth
-  // bypass tracked separately as issue #948 (BE-001), not fixed here.
-  'wallet.js': new Set(['GET /signers']),
-};
+const ALLOWLIST = {};
 
 const ROUTE_CALL_RE = /router\.(get|post|put|patch|delete)\(\s*(['"`])([^'"`]+)\2/g;
 

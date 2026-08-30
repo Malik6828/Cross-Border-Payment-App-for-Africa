@@ -35,6 +35,11 @@ const wsConnections = new client.Gauge({
   registers: [registry],
 });
 
+const anchorPollDuration = new client.Histogram({
+  name: 'anchor_poll_duration_seconds',
+  help: 'Anchor transaction-status poll duration in seconds, per anchor',
+  labelNames: ['anchor', 'success'],
+  buckets: [0.05, 0.1, 0.3, 0.5, 1, 2, 5, 10],
 const paymentsTotal = new client.Counter({
   name: 'afripay_payments_total',
   help: 'Total payment state changes',
@@ -135,6 +140,25 @@ const geoDenialsTotal = new client.Counter({
   name: 'afripay_geo_denials_total',
   help: 'Total requests denied by geo-restriction, labelled by country and route',
   labelNames: ['country', 'route'],
+const txQueueDepth = new client.Gauge({
+  name: 'afripay_tx_queue_depth',
+  help: 'Number of per-wallet transaction submission queues currently holding a pending/in-flight task (txQueue.js)',
+  registers: [registry],
+});
+
+const txQueueBackpressure = new client.Gauge({
+  name: 'afripay_tx_queue_backpressure',
+  help: 'Whether the transaction submission queue is under backpressure — total pending tasks across all wallet queues exceeds the configured threshold (1) or not (0)',
+  registers: [registry],
+});
+
+const txQueuePendingTasksTotal = new client.Gauge({
+  name: 'afripay_tx_queue_pending_tasks_total',
+  help: 'Total pending/in-flight tasks across all per-wallet transaction submission queues (txQueue.js)',
+const sep31CallbackSkippedTotal = new client.Counter({
+  name: 'afripay_sep31_callback_skipped_total',
+  help: 'Total SEP-31 callbacks skipped instead of being delivered, labelled by reason',
+  labelNames: ['reason'],
   registers: [registry],
 });
 
@@ -144,6 +168,7 @@ module.exports = {
   horizonRequestDuration,
   dbQueryDuration,
   wsConnections,
+  anchorPollDuration,
   paymentsTotal,
   paymentAmountUsdc,
   afripayHorizonDuration,
@@ -159,4 +184,8 @@ module.exports = {
   horizonFallbackDurationSeconds,
   horizonFallbackAlertsTotal,
   geoDenialsTotal,
+  txQueueDepth,
+  txQueueBackpressure,
+  txQueuePendingTasksTotal,
+  sep31CallbackSkippedTotal,
 };

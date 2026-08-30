@@ -24,6 +24,7 @@ const QRCode = require('qrcode');
 const cache = require('../utils/cache');
 const audit = require('../services/audit');
 const { verifyToken } = require('../services/twofa');
+const { comparePIN } = require('../services/pin');
 
 
 const MAX_WALLETS_PER_USER = 5;
@@ -248,20 +249,49 @@ async function getWalletTransactions(req, res, next) {
 // ---------------------------------------------------------------------------
 async function exportKey(req, res, next) {
   try {
-    const { password, wallet_id, totp_code } = req.body;
+    const { password, wallet_id, totp_code, pin } = req.body;
     if (!password) return res.status(400).json({ error: 'Password is required' });
 
-    const userResult = await db.query('SELECT password_hash, totp_enabled, totp_secret FROM users WHERE id = $1', [req.user.userId]);
+    const userResult = await db.query(
+      'SELECT password_hash, totp_enabled, totp_secret, pin_hash FROM users WHERE id = $1',
+      [req.user.userId]
+    );
     if (!userResult.rows[0]) return res.status(404).json({ error: 'User not found' });
+    const { password_hash, totp_enabled, totp_secret, pin_hash } = userResult.rows[0];
 
-    const valid = await bcrypt.compare(password, userResult.rows[0].password_hash);
-    if (!valid) return res.status(401).json({ error: 'Incorrect password' });
+    const valid = await bcrypt.compare(password, password_hash);
+    if (!valid) {
+      audit.log(req.user.userId, 'wallet_export_failed', req.ip, req.headers['user-agent'], { reason: 'invalid_password' });
+      return res.status(401).json({ error: 'Incorrect password' });
+    }
 
-    // Check 2FA if enabled
-    if (userResult.rows[0].totp_enabled) {
-      if (!totp_code) return res.status(403).json({ error: '2FA verification required' });
-      const isValidTotp = verifyToken(userResult.rows[0].totp_secret, totp_code);
-      if (!isValidTotp) return res.status(403).json({ error: '2FA verification required' });
+    // Step-up verification: a valid password/session is not enough for a secret-key
+    // export — require a fresh PIN or TOTP challenge on top of it (#959).
+    if (totp_enabled) {
+      if (!totp_code) {
+        audit.log(req.user.userId, 'wallet_export_failed', req.ip, req.headers['user-agent'], { reason: 'missing_2fa' });
+        return res.status(403).json({ error: '2FA verification required' });
+      }
+      const isValidTotp = verifyToken(totp_secret, totp_code);
+      if (!isValidTotp) {
+        audit.log(req.user.userId, 'wallet_export_failed', req.ip, req.headers['user-agent'], { reason: 'invalid_2fa' });
+        return res.status(403).json({ error: '2FA verification required' });
+      }
+    } else {
+      if (!pin_hash) {
+        return res.status(403).json({
+          error: 'A PIN or 2FA must be configured before exporting your secret key. Set up a PIN in Settings first.',
+        });
+      }
+      if (!pin) {
+        audit.log(req.user.userId, 'wallet_export_failed', req.ip, req.headers['user-agent'], { reason: 'missing_pin' });
+        return res.status(403).json({ error: 'PIN verification required' });
+      }
+      const isValidPin = await comparePIN(pin, pin_hash);
+      if (!isValidPin) {
+        audit.log(req.user.userId, 'wallet_export_failed', req.ip, req.headers['user-agent'], { reason: 'invalid_pin' });
+        return res.status(403).json({ error: 'Invalid PIN' });
+      }
     }
 
     const wallet = await resolveWallet(req.user.userId, wallet_id || null);

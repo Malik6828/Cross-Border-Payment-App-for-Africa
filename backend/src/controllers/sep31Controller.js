@@ -130,6 +130,7 @@ async function getInfo(req, res, next) {
  */
 async function createTransaction(req, res, next) {
   try {
+    const { amount, asset_code = 'USDC', receiver_account, fields = {}, sender_name, sender_email, callback_url } = req.body;
     const {
       amount,
       asset_code = 'USDC',
@@ -147,6 +148,13 @@ async function createTransaction(req, res, next) {
 
     if (!amount || !receiver_account) {
       return res.status(400).json({ error: 'amount and receiver_account required' });
+    }
+
+    // SSRF-hardened: resolve-then-validate against the shared allow-list
+    // (see BE-015). Re-validated again immediately before every callback
+    // delivery attempt, not just here.
+    if (callback_url && !(await validateCallbackUrl(callback_url))) {
+      return res.status(400).json({ error: 'callback_url must be a public HTTPS endpoint' });
     }
 
     // Validate fields against anchor /info schema
@@ -172,7 +180,27 @@ async function createTransaction(req, res, next) {
 
     const txId = uuidv4();
     const sharedSecret = callback_url ? crypto.randomBytes(32).toString('hex') : null;
+
+    // A transaction with a callback_url must never be persisted without a shared_secret —
+    // deliverCallback() would otherwise sign the outbound webhook with an empty-string key (#951).
+    if (callback_url && !sharedSecret) {
+      logger.error('Refusing to create SEP-31 transaction ready for callback delivery without a shared_secret', {
+        userId,
+        callback_url,
+      });
+      return res.status(500).json({ error: 'Failed to configure callback delivery for this transaction' });
+    }
+
     await db.query(
+      `INSERT INTO sep31_transactions (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status, callback_url)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)`,
+      [txId, userId, receiver_account, amount, asset_code, kycVerified, callback_url || null]
+    );
+
+    if (callback_url) {
+      // Fire-and-forget: delivery failures are logged, never block the response.
+      deliverCallback(callback_url, { transaction_id: txId, status: 'pending' }).catch(() => {});
+    }
       `INSERT INTO sep31_transactions
          (id, sender_id, receiver_account, amount, asset_code, kyc_verified, status, callback_url, shared_secret)
        VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)`,
