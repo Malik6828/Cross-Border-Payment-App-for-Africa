@@ -45,6 +45,7 @@ const geoRestriction = require('./middleware/geoRestriction');
 
 const swaggerJsdoc = require('swagger-jsdoc');
 const swaggerUi = require('swagger-ui-express');
+const paymentSendValidators = require('./validators/paymentSendValidators');
 
 const logger = require('./utils/logger');
 const { runHealthChecks, runDeepHealthChecks } = require('./services/health');
@@ -185,7 +186,11 @@ const swaggerOptions = {
               }
             }
           }
-        }
+        },
+        // Derived directly from the express-validator field spec in
+        // validators/paymentSendValidators.js so the docs cannot drift from
+        // what the runtime validators actually accept.
+        PaymentSendRequest: paymentSendValidators.openApiSchema
       }
     }
   },
