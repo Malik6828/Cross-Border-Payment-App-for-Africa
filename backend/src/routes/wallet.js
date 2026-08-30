@@ -180,7 +180,6 @@ router.post(
   validate,
   upgradeToBusinessAccount,
 );
-router.get('/signers', listSigners);
 router.get('/signers', isAdminOrOwner(), listSigners);
 router.get('/signers/horizon', getSignersFromHorizon);
 router.post('/clear-inflation-destination', clearInflationDestinationHandler);
