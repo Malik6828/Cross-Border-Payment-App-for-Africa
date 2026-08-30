@@ -35,9 +35,11 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const login = async (email, password, options = {}, deviceToken = null) => {
-    const headers = deviceToken ? { 'x-device-token': deviceToken } : {};
-    const res = await api.post('/auth/login', { email, password, ...options }, { headers });
+  // Device-trust is carried by an httpOnly cookie the backend sets on login
+  // (issue #995) — the browser attaches it automatically via withCredentials,
+  // so no token is read from or written to localStorage here.
+  const login = async (email, password, options = {}) => {
+    const res = await api.post('/auth/login', { email, password, ...options });
     tokenStore.set(res.data.token);
     setUser(res.data.user);
     Sentry.setUser({
@@ -60,7 +62,6 @@ export function AuthProvider({ children }) {
     }
     tokenStore.clear();
     localStorage.removeItem('afripay_slippage');
-    localStorage.removeItem('afripay_device_token');
     setUser(null);
     Sentry.setUser(null);
   };

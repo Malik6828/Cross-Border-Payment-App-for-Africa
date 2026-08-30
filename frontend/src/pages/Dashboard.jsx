@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Send,
@@ -69,6 +69,16 @@ export default function Dashboard() {
       setShowPINSetup(true);
     }
   }, [user]);
+
+  // Issue #996: guard against setState after unmount from timers/promises
+  // started in event handlers (not owned by a useEffect cleanup).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Issue #455: Push notification opt-in banner
   const { supported: pushSupported, subscribed: pushSubscribed, loading: pushLoading, subscribe: pushSubscribe } = usePushNotifications();
@@ -142,13 +152,16 @@ export default function Dashboard() {
       if (payment.to === wallet?.public_key) {
         toast.success(`Received ${payment.amount} ${payment.asset}`);
         setBalanceIncreased(true);
-        setTimeout(() => setBalanceIncreased(false), 2000);
+        setTimeout(() => {
+          if (mountedRef.current) setBalanceIncreased(false);
+        }, 2000);
         Promise.all([
           api.get('/wallet/list'),
           api.get('/payments/history'),
           api.get('/scheduled-payments').catch(() => ({ data: { payments: [] } })),
         ])
           .then(([walletsRes, txRes, scheduledRes]) => {
+            if (!mountedRef.current) return;
             setWallets(walletsRes.data.wallets);
             setTransactions(txRes.data.transactions.slice(0, 5));
             setScheduledPayments(
@@ -274,7 +287,9 @@ export default function Dashboard() {
     try {
       await navigator.clipboard.writeText(wallet.public_key);
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      setTimeout(() => {
+        if (mountedRef.current) setCopied(false);
+      }, 2000);
     } catch {
       toast.error('Failed to copy address');
     }

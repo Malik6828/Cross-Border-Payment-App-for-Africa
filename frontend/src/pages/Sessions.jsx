@@ -12,7 +12,10 @@ export default function Sessions() {
   const [revoking, setRevoking] = useState(null);
   const [confirmAll, setConfirmAll] = useState(false);
   const [confirmSingle, setConfirmSingle] = useState(null);
-  const [trustedDevice, setTrustedDevice] = useState(null); // { expiry: Date } | null
+  // Device trust is now an httpOnly cookie set by the backend (issue #995) — the
+  // frontend can no longer read or decode the token itself. We always offer a
+  // "forget this device" action; the backend clears the cookie if one exists.
+  const [revokingTrust, setRevokingTrust] = useState(false);
 
   const load = async () => {
     try {
@@ -27,19 +30,6 @@ export default function Sessions() {
 
   useEffect(() => {
     load();
-    const raw = localStorage.getItem('afripay_device_token');
-    if (raw) {
-      try {
-        const payload = JSON.parse(atob(raw.split('.')[1]));
-        if (payload.exp * 1000 > Date.now()) {
-          setTrustedDevice({ expiry: new Date(payload.exp * 1000) });
-        } else {
-          localStorage.removeItem('afripay_device_token');
-        }
-      } catch {
-        localStorage.removeItem('afripay_device_token');
-      }
-    }
   }, []);
 
   const revoke = async (id) => {
@@ -56,10 +46,16 @@ export default function Sessions() {
     }
   };
 
-  const revokeTrustedDevice = () => {
-    localStorage.removeItem('afripay_device_token');
-    setTrustedDevice(null);
-    toast.success('Device trust removed');
+  const revokeTrustedDevice = async () => {
+    setRevokingTrust(true);
+    try {
+      await api.delete('/auth/device-trust');
+      toast.success('Device trust removed');
+    } catch {
+      toast.error('Failed to remove device trust');
+    } finally {
+      setRevokingTrust(false);
+    }
   };
 
   const revokeAll = async () => {
@@ -152,31 +148,30 @@ export default function Sessions() {
         </div>
       )}
 
-      {trustedDevice && (
-        <div className="mt-6">
-          <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Trusted Device</h3>
-          <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 bg-primary-500/20 rounded-lg flex items-center justify-center shrink-0">
-                <ShieldCheck size={16} className="text-primary-400" />
-              </div>
-              <div>
-                <p className="text-sm text-white font-medium">This device</p>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  Trusted until {trustedDevice.expiry.toLocaleDateString()}
-                </p>
-              </div>
+      <div className="mt-6">
+        <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Trusted Device</h3>
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 bg-primary-500/20 rounded-lg flex items-center justify-center shrink-0">
+              <ShieldCheck size={16} className="text-primary-400" />
             </div>
-            <button
-              onClick={revokeTrustedDevice}
-              className="text-red-400 hover:text-red-300 shrink-0"
-              aria-label="Remove device trust"
-            >
-              <Trash2 size={16} />
-            </button>
+            <div>
+              <p className="text-sm text-white font-medium">This device</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                If you chose "remember this device" at login, forget it here.
+              </p>
+            </div>
           </div>
+          <button
+            onClick={revokeTrustedDevice}
+            disabled={revokingTrust}
+            className="text-red-400 hover:text-red-300 shrink-0 disabled:opacity-50"
+            aria-label="Remove device trust"
+          >
+            <Trash2 size={16} />
+          </button>
         </div>
-      )}
+      </div>
 
       <ConfirmModal
         isOpen={confirmAll}
