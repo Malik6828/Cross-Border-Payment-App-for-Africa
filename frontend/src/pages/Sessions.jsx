@@ -11,6 +11,9 @@ export default function Sessions() {
   const [loading, setLoading] = useState(true);
   const [revoking, setRevoking] = useState(null);
   const [confirmAll, setConfirmAll] = useState(false);
+  // 'others' = revoke all other sessions (keep current); 'all' = revoke every session
+  // including the current one (will sign the user out of this device too).
+  const [confirmAllScope, setConfirmAllScope] = useState('others');
   const [confirmSingle, setConfirmSingle] = useState(null);
   // Device trust is now an httpOnly cookie set by the backend (issue #995) — the
   // frontend can no longer read or decode the token itself. We always offer a
@@ -61,9 +64,18 @@ export default function Sessions() {
   const revokeAll = async () => {
     setRevoking('all');
     try {
-      await api.delete('/auth/sessions?keep_current=true');
-      await load();
-      toast.success('All other sessions revoked');
+      if (confirmAllScope === 'others') {
+        // keep_current=true — current session is preserved; user stays logged in here.
+        await api.delete('/auth/sessions?keep_current=true');
+        await load();
+        toast.success('All other sessions revoked');
+      } else {
+        // Revoke ALL sessions including the current one — user will be signed out.
+        await api.delete('/auth/sessions');
+        // After this the JWT is invalidated; navigate to login.
+        toast.success('Signed out of all devices');
+        navigate('/login');
+      }
     } catch {
       toast.error('Failed to revoke sessions');
     } finally {
@@ -82,7 +94,7 @@ export default function Sessions() {
         <h2 className="text-2xl font-bold text-white">Active Sessions</h2>
         {sessions.length > 1 && (
           <button
-            onClick={() => setConfirmAll(true)}
+            onClick={() => { setConfirmAllScope('others'); setConfirmAll(true); }}
             disabled={revoking === 'all'}
             className="text-sm text-red-400 hover:text-red-300 flex items-center gap-1 disabled:opacity-50"
           >
@@ -177,12 +189,34 @@ export default function Sessions() {
         isOpen={confirmAll}
         onClose={() => setConfirmAll(false)}
         onConfirm={revokeAll}
-        title="Logout from all other sessions?"
-        message="This will immediately invalidate all other active sessions. You will remain logged in on this device. Any ongoing operations on those sessions will be interrupted."
-        confirmLabel="Logout Everywhere"
+        title={
+          confirmAllScope === 'others'
+            ? 'Logout from all other sessions?'
+            : 'Logout from ALL sessions including this device?'
+        }
+        message={
+          confirmAllScope === 'others'
+            ? 'This will immediately invalidate all other active sessions. You will remain logged in on this device. Any ongoing operations on those sessions will be interrupted.'
+            : '⚠️ This will sign you out of every device, including the one you are using right now. You will be redirected to the login screen immediately. Any unsaved work on this device will be lost.'
+        }
+        confirmLabel={confirmAllScope === 'others' ? 'Logout Everywhere Else' : 'Logout All Devices (including this one)'}
         confirmVariant="danger"
         loading={revoking === 'all'}
-      />
+      >
+        {/* Secondary action: switch to the "include this device" scope */}
+        {confirmAllScope === 'others' && (
+          <p className="text-xs text-gray-500 mt-3 text-center">
+            Want to also sign out of this device?{' '}
+            <button
+              className="text-red-400 hover:text-red-300 underline"
+              onClick={() => setConfirmAllScope('all')}
+              data-testid="sessions-include-this-device"
+            >
+              Include this device
+            </button>
+          </p>
+        )}
+      </ConfirmModal>
 
       <ConfirmModal
         isOpen={!!confirmSingle}

@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Users, DollarSign, TrendingUp, Server, BarChart3 } from 'lucide-react';
+import { Activity, Users, DollarSign, TrendingUp, Server, BarChart3, ShieldAlert, CheckCircle, XCircle } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line,
 } from 'recharts';
 import api from '../utils/api';
 import toast from 'react-hot-toast';
+import ConfirmModal from '../components/ConfirmModal';
 
 const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -47,6 +48,17 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [chartMode, setChartMode] = useState('volume');
 
+  // ── Bulk user actions state ───────────────────────────────────────────────
+  /** Current filter for bulk user selection. */
+  const [bulkFilter, setBulkFilter] = useState('unverified');
+  /** Users matching the current filter — populated before showing the confirm modal. */
+  const [bulkPreviewUsers, setBulkPreviewUsers] = useState([]);
+  /** Which action has been staged for confirmation. */
+  const [bulkAction, setBulkAction] = useState(null); // 'suspend' | 'verify' | null
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [bulkPreviewLoading, setBulkPreviewLoading] = useState(false);
+  // ─────────────────────────────────────────────────────────────────────────
+
   useEffect(() => {
     Promise.all([
       api.get('/admin/stats'),
@@ -59,6 +71,46 @@ export default function AdminDashboard() {
     }).catch(() => toast.error('Failed to load admin stats'))
       .finally(() => setLoading(false));
   }, []);
+
+  /**
+   * Fetch a preview of the users that will be affected by the chosen bulk action
+   * and filter, then open the confirmation modal.  This ensures the admin reviews
+   * the exact list (or a representative sample + total count) before submitting.
+   */
+  const handleStageBulkAction = async (action) => {
+    setBulkPreviewLoading(true);
+    try {
+      const res = await api.get(`/admin/users?filter=${encodeURIComponent(bulkFilter)}&limit=50`);
+      const users = res.data?.users ?? res.data ?? [];
+      setBulkPreviewUsers(users);
+      setBulkAction(action);
+    } catch {
+      toast.error('Failed to load affected users. Please try again.');
+    } finally {
+      setBulkPreviewLoading(false);
+    }
+  };
+
+  /** Execute the confirmed bulk action. */
+  const handleConfirmBulkAction = async () => {
+    setBulkLoading(true);
+    try {
+      await api.post('/admin/users/bulk', {
+        action: bulkAction,
+        filter: bulkFilter,
+        user_ids: bulkPreviewUsers.map((u) => u.id),
+      });
+      toast.success(
+        `Bulk ${bulkAction} applied to ${bulkPreviewUsers.length} user${bulkPreviewUsers.length !== 1 ? 's' : ''}`
+      );
+      setBulkAction(null);
+      setBulkPreviewUsers([]);
+    } catch {
+      toast.error('Bulk action failed. Please try again.');
+    } finally {
+      setBulkLoading(false);
+    }
+  };
 
   if (loading) return (
     <div className="flex items-center justify-center h-64" role="status" aria-live="polite" aria-label="Loading admin dashboard">
@@ -270,6 +322,118 @@ export default function AdminDashboard() {
           <p className="text-primary-100" role="status" aria-live="polite">Loading network stats...</p>
         )}
       </div>
+
+      {/* ── Bulk User Actions ─────────────────────────────────────────────── */}
+      <div
+        className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-xl p-5 shadow-sm"
+        role="region"
+        aria-labelledby="bulk-actions-heading"
+        data-testid="bulk-actions-section"
+      >
+        <div className="flex items-center gap-2 mb-4">
+          <ShieldAlert size={20} className="text-red-500" aria-hidden="true" />
+          <h3 id="bulk-actions-heading" className="text-lg font-semibold text-gray-900 dark:text-white">
+            Bulk User Actions
+          </h3>
+        </div>
+
+        <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Apply an action to all users matching the selected filter. You will be shown
+          the exact list of affected accounts before anything is submitted.
+        </p>
+
+        {/* Filter selector */}
+        <div className="flex flex-col sm:flex-row gap-3 mb-4">
+          <div className="flex-1">
+            <label
+              htmlFor="bulk-filter"
+              className="block text-xs text-gray-500 dark:text-gray-400 mb-1"
+            >
+              User filter
+            </label>
+            <select
+              id="bulk-filter"
+              value={bulkFilter}
+              onChange={(e) => setBulkFilter(e.target.value)}
+              className="w-full bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-white rounded-lg px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 focus:outline-none focus:border-primary-500"
+              data-testid="bulk-filter-select"
+            >
+              <option value="unverified">Unverified users (KYC pending)</option>
+              <option value="inactive_30d">Inactive for 30+ days</option>
+              <option value="inactive_90d">Inactive for 90+ days</option>
+              <option value="suspended">Currently suspended</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex flex-wrap gap-3">
+          <button
+            onClick={() => handleStageBulkAction('suspend')}
+            disabled={bulkPreviewLoading}
+            className="flex items-center gap-2 px-4 py-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            data-testid="bulk-suspend-button"
+          >
+            <XCircle size={15} />
+            {bulkPreviewLoading && bulkAction === null ? 'Loading…' : 'Suspend Matching Users'}
+          </button>
+          <button
+            onClick={() => handleStageBulkAction('verify')}
+            disabled={bulkPreviewLoading}
+            className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            data-testid="bulk-verify-button"
+          >
+            <CheckCircle size={15} />
+            {bulkPreviewLoading && bulkAction === null ? 'Loading…' : 'Verify Matching Users'}
+          </button>
+        </div>
+      </div>
+
+      {/* Bulk action confirmation modal — shows reviewable list of affected accounts */}
+      <ConfirmModal
+        isOpen={!!bulkAction}
+        onClose={() => { setBulkAction(null); setBulkPreviewUsers([]); }}
+        onConfirm={handleConfirmBulkAction}
+        title={`Confirm bulk ${bulkAction} (${bulkPreviewUsers.length} user${bulkPreviewUsers.length !== 1 ? 's' : ''})`}
+        message={`You are about to ${bulkAction} the ${bulkPreviewUsers.length} account${bulkPreviewUsers.length !== 1 ? 's' : ''} listed below. This action cannot be automatically undone.`}
+        confirmLabel={`${bulkAction === 'suspend' ? 'Suspend' : 'Verify'} ${bulkPreviewUsers.length} User${bulkPreviewUsers.length !== 1 ? 's' : ''}`}
+        confirmVariant="danger"
+        loading={bulkLoading}
+        data-testid="bulk-confirm-modal"
+      >
+        {/* Scrollable, reviewable list of affected users */}
+        {bulkPreviewUsers.length > 0 && (
+          <div
+            className="mt-4 max-h-48 overflow-y-auto rounded-lg border border-gray-700 bg-gray-800"
+            aria-label="Affected user accounts"
+            data-testid="bulk-preview-list"
+          >
+            <table className="w-full text-xs">
+              <thead className="sticky top-0 bg-gray-700 text-gray-300">
+                <tr>
+                  <th className="px-3 py-2 text-left font-medium">#</th>
+                  <th className="px-3 py-2 text-left font-medium">Email</th>
+                  <th className="px-3 py-2 text-left font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-700">
+                {bulkPreviewUsers.map((u, idx) => (
+                  <tr key={u.id} className="text-gray-300">
+                    <td className="px-3 py-2 text-gray-500">{idx + 1}</td>
+                    <td className="px-3 py-2 font-mono">{u.email}</td>
+                    <td className="px-3 py-2">{u.kyc_status || u.status || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {bulkPreviewUsers.length === 0 && (
+          <p className="mt-3 text-xs text-gray-500 text-center">
+            No users match the selected filter. The action will have no effect.
+          </p>
+        )}
+      </ConfirmModal>
     </div>
   );
 }
