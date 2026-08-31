@@ -1,10 +1,13 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, TrendingUp, Download, FileText, Loader2 } from 'lucide-react';
+import { ArrowLeft, TrendingUp, Download, FileText, Loader2, RefreshCw, AlertCircle } from 'lucide-react';
 import api from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import { useTranslation } from 'react-i18next';
 import toast from 'react-hot-toast';
+
+/** Analytics data is considered stale after this many minutes. */
+const STALE_THRESHOLD_MINUTES = 60;
 
 
 function toDateInput(d) {
@@ -25,7 +28,9 @@ export default function Analytics() {
 
   const [range, setRange] = useState(defaultRange);
   const [data, setData] = useState(null);
+  const [refreshedAt, setRefreshedAt] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [csvLoading, setCsvLoading] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const abortRef = useRef(null);
@@ -42,6 +47,9 @@ export default function Analytics() {
         signal: controller.signal,
       });
       setData(res.data);
+      // Backend (BE-021) returns refreshed_at on the analytics response;
+      // fall back to the current time if the field is absent.
+      setRefreshedAt(res.data?.refreshed_at ? new Date(res.data.refreshed_at) : new Date());
     } catch (err) {
       if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return;
       toast.error(t('analytics.error') || 'Failed to load analytics');
@@ -49,6 +57,30 @@ export default function Analytics() {
       setLoading(false);
     }
   }, [range.from, range.to, t]);
+
+  /**
+   * Trigger a server-side materialized-view refresh (BE-021 admin endpoint),
+   * then re-fetch the analytics data.  Admin-only; the backend enforces the role
+   * check — this button is surfaced for all users but will receive 403 for non-admins.
+   * The UI gracefully surfaces the error so the button doesn't appear broken.
+   */
+  const handleManualRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await api.post('/admin/analytics/refresh');
+      toast.success('Analytics data refreshed');
+      // Re-fetch with fresh data
+      await fetchAnalytics();
+    } catch (err) {
+      if (err?.response?.status === 403) {
+        toast.error('Only admins can trigger a manual refresh');
+      } else {
+        toast.error('Refresh failed — please try again');
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchAnalytics]);
 
   useEffect(() => {
     fetchAnalytics();
@@ -172,6 +204,48 @@ export default function Analytics() {
           <TrendingUp size={24} className="text-primary-500" />
           <h2 className="text-2xl font-bold text-white">{t('analytics.title') || 'Analytics'}</h2>
         </div>
+
+        {/* Data-as-of timestamp + stale indicator + manual refresh */}
+        {refreshedAt && (
+          <div
+            className={`flex items-center justify-between gap-3 rounded-xl px-4 py-3 mb-4 border ${
+              (Date.now() - refreshedAt.getTime()) / 60000 > STALE_THRESHOLD_MINUTES
+                ? 'bg-yellow-500/10 border-yellow-500/30'
+                : 'bg-gray-800 border-gray-700'
+            }`}
+            data-testid="analytics-timestamp-banner"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              {(Date.now() - refreshedAt.getTime()) / 60000 > STALE_THRESHOLD_MINUTES && (
+                <AlertCircle
+                  size={15}
+                  className="text-yellow-400 shrink-0"
+                  aria-label="Stale data"
+                  data-testid="analytics-stale-indicator"
+                />
+              )}
+              <p className="text-xs text-gray-400 truncate" data-testid="analytics-refreshed-at">
+                Data as of{' '}
+                <span className="text-gray-200 font-medium">
+                  {refreshedAt.toLocaleString()}
+                </span>
+                {(Date.now() - refreshedAt.getTime()) / 60000 > STALE_THRESHOLD_MINUTES && (
+                  <span className="ml-2 text-yellow-400 font-medium">— data may be stale</span>
+                )}
+              </p>
+            </div>
+            <button
+              onClick={handleManualRefresh}
+              disabled={refreshing || loading}
+              className="flex items-center gap-1.5 text-xs text-primary-400 hover:text-primary-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shrink-0"
+              title="Trigger a server-side analytics refresh (admin only)"
+              data-testid="analytics-refresh-button"
+            >
+              <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
+              {refreshing ? 'Refreshing…' : 'Refresh'}
+            </button>
+          </div>
+        )}
 
         {/* Date range */}
         <div className="flex gap-3 mb-6 items-end">

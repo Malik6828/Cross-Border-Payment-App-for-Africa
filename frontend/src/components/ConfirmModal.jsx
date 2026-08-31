@@ -1,7 +1,7 @@
 import React from 'react';
 import { AlertTriangle, X } from 'lucide-react';
 
-export default function ConfirmModal({ isOpen, onClose, onConfirm, title, message, confirmLabel, confirmVariant, loading }) {
+export default function ConfirmModal({ isOpen, onClose, onConfirm, title, message, confirmLabel, confirmVariant, loading, children }) {
   if (!isOpen) return null;
 
   const confirmButtonClass =
@@ -24,6 +24,9 @@ export default function ConfirmModal({ isOpen, onClose, onConfirm, title, messag
 
         <div className="px-6 py-6">
           <p className="text-sm text-gray-300 leading-relaxed">{message}</p>
+
+          {/* Optional extra content (e.g. secondary action links) */}
+          {children}
 
           <div className="flex gap-3 pt-6">
             <button
